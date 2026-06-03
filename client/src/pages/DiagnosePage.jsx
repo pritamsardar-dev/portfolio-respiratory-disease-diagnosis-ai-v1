@@ -83,7 +83,9 @@ function downloadPDF(result) {
   doc.setFont("helvetica", "normal");
   doc.text("Respiratory Disease Analysis Report", margin, 28);
   doc.text(`Generated: ${new Date(result.diagnosedAt).toLocaleString()}`, margin, 36);
-  doc.text(`Total Samples: ${result.total_samples}`, pageW - margin, 36, { align: "right" });
+  const headerMeta = [`Total Samples: ${result.total_samples}`];
+  if (result.processingTime) headerMeta.push(`Processing Time: ${result.processingTime}`);
+  doc.text(headerMeta.join("   ·   "), pageW - margin, 36, { align: "right" });
 
   y = 58;
 
@@ -740,11 +742,18 @@ function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }
         >
           {result.isStored ? "Previous Diagnosis" : "Diagnosis Result"}
         </p>
-        {result.isStored && result.diagnosedAt && (
-          <span style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.45 }}>
-            {new Date(result.diagnosedAt).toLocaleDateString()}
-          </span>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {result.processingTime && !result.isStored && (
+            <span style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.45, fontFamily: "monospace" }}>
+              {result.processingTime}
+            </span>
+          )}
+          {result.isStored && result.diagnosedAt && (
+            <span style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.45 }}>
+              {new Date(result.diagnosedAt).toLocaleDateString()}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Severity Badge and Diagnosis Name */}
@@ -1132,6 +1141,27 @@ function ReportModal({ result, onClose }) {
                 {result.total_samples}
               </p>
             </div>
+
+            {result.processingTime && (
+              <div>
+                <p
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.06em",
+                    color: "var(--text)",
+                    opacity: 0.5,
+                    marginBottom: 3,
+                  }}
+                >
+                  Processing Time
+                </p>
+                <p style={{ fontSize: "var(--fs-sm)", fontWeight: 500, color: "var(--text-h)", fontFamily: "monospace" }}>
+                  {result.processingTime}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Diagnosis */}
@@ -1397,6 +1427,8 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
     // Populate the input panel immediately so the user sees the files
     if (Array.isArray(overrideFiles)) setFiles(overrideFiles);
 
+    const diagnosisStart = Date.now();
+
     setIsRunning(true);
     setProcessingSteps([]);
     setError(null);
@@ -1435,9 +1467,16 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
         setProcessingSteps((prev) => [...prev, step]);
       }
 
+      const processingMs = Date.now() - diagnosisStart;
+      const processingTime =
+        processingMs < 60000
+          ? `${(processingMs / 1000).toFixed(1)}s`
+          : `${Math.floor(processingMs / 60000)}m ${((processingMs % 60000) / 1000).toFixed(0)}s`;
+
       const resultData = {
         ...data,
         diagnosedAt: new Date().toISOString(),
+        processingTime,
         isStored: false,
       };
 
