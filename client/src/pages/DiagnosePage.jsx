@@ -508,6 +508,65 @@ function InputSection({
   );
 }
 
+function DiagnosisProgress() {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+  return (
+    <div
+      className="med-card"
+      style={{
+        padding: 24,
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 16,
+      }}
+    >
+      <div className="ai-spinner" style={{ width: 36, height: 36 }} />
+
+      <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text-h)" }}>
+        Analysing audio samples…
+      </p>
+
+      <div
+        style={{
+          background: "var(--card2)",
+          border: "1px solid var(--border)",
+          borderRadius: 10,
+          padding: "9px 18px",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
+        <p style={{ fontSize: 12, color: "var(--text)", opacity: 0.7 }}>
+          Processing time
+        </p>
+        <p style={{ fontSize: 13, fontWeight: 700, color: "var(--accent)", fontFamily: "monospace" }}>
+          {timeStr}
+        </p>
+      </div>
+
+      <p style={{ fontSize: 12, color: "var(--text)", opacity: 0.45, textAlign: "center", lineHeight: 1.6 }}>
+        This may take a moment depending on the number
+        <br />
+        of files and server load. Please hold on.
+      </p>
+    </div>
+  );
+}
+
 // OutputSection
 
 function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }) {
@@ -651,24 +710,7 @@ function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }
 
   // Loading state
   if (isRunning && !result) {
-    return (
-      <div
-        className="med-card"
-        style={{
-          padding: "20px 20px 18px",
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <div className="ai-spinner" style={{ width: 36, height: 36, marginBottom: 12 }} />
-        <p style={{ fontSize: "var(--fs-base)", color: "var(--text)", opacity: 0.7 }}>
-          Processing audio samples...
-        </p>
-      </div>
-    );
+    return <DiagnosisProgress />;
   }
 
   if (!result) return null;
@@ -1361,6 +1403,14 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
     setResult(null);
     setDiagnosisComplete(false);
     setProcessingOpen(true);
+
+    // Scroll output into view on mobile as soon as diagnosis starts
+    if (window.innerWidth < 640 && outputRef.current) {
+      setTimeout(() => {
+        const elementTop = outputRef.current.getBoundingClientRect().top + window.pageYOffset;
+        window.scrollTo({ top: elementTop - 88, behavior: "smooth" });
+      }, 200);
+    }
 
     try {
       const formData = new FormData();
