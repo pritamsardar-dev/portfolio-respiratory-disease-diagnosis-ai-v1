@@ -1,0 +1,116 @@
+node_modules
+dist
+build
+.vite
+coverage
+.next
+.nuxt
+.out
+
+.cache
+.parcel-cache
+.svelte-kit
+.vercel
+.netlify
+
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+
+.env
+.env.*
+
+.git
+.github
+
+.vscode
+.idea
+
+*.map
+
+*.min.js
+*.min.css
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.avif
+*.bmp
+*.tiff
+*.tif
+*.ico
+*.icns
+*.heic
+*.heif
+
+# Vector Images
+*.eps
+*.ai
+
+# Audio
+*.mp3
+*.wav
+*.ogg
+*.aac
+*.flac
+*.m4a
+*.wma
+
+# Video
+*.mp4
+*.webm
+*.mov
+*.avi
+*.mkv
+*.wmv
+*.m4v
+*.mpeg
+*.mpg
+
+# Fonts
+*.ttf
+*.otf
+*.woff
+*.woff2
+*.eot
+
+# Archives
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+*.tgz
+
+# Documents
+*.pdf
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+
+# Data
+*.csv
+*.tsv
+
+# Logs
+*.log
+
+# Binary Files
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+
+# Certificates / Keys
+*.pem
+*.crt
+*.key
+*.p12
