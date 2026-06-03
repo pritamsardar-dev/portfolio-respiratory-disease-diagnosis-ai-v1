@@ -5,17 +5,17 @@ import { DownloadIcon, DiagnoseIcon, ExternalLinkIcon, AlertIcon } from "../asse
 // Glob imports — pulls every WAV from each class folder as a resolved URL.
 // SamplesPage is in src/pages/, so assets are one level up.
 const SAMPLE_MODULES = {
-  healthy: import.meta.glob("../assets/samples/healthy/*.wav", { as: "url", eager: true }),
-  copd: import.meta.glob("../assets/samples/copd/*.wav", { as: "url", eager: true }),
-  pneumonia: import.meta.glob("../assets/samples/pneumonia/*.wav", { as: "url", eager: true }),
+  healthy: import.meta.glob("../assets/samples/healthy/*.wav", { as: "url", eager: false }),
+  copd: import.meta.glob("../assets/samples/copd/*.wav", { as: "url", eager: false }),
+  pneumonia: import.meta.glob("../assets/samples/pneumonia/*.wav", { as: "url", eager: false }),
 };
 
 // Converts the glob result object into a usable [{name, url}] array
 function getFiles(id) {
   const mod = SAMPLE_MODULES[id] ?? {};
-  return Object.entries(mod).map(([path, url]) => ({
+  return Object.entries(mod).map(([path, resolver]) => ({
     name: path.split("/").pop(),
-    url,
+    url: resolver(),
   }));
 }
 
@@ -74,7 +74,7 @@ function SampleCard({ sample, onAutoTest }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const files = getFiles(sample.id);
+  const files = getFiles(sample.id) || [];
 
   // Fetches all WAV files in this class folder and passes File[] to onAutoTest.
   // DiagnosePage handles arrays via: Array.isArray(autoTestFile) ? autoTestFile : [autoTestFile]
