@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 import clsx from "clsx";
 import jsPDF from "jspdf";
-import { StethoscopeIcon } from "lucide-react";
+import { StethoscopeIcon, XCircleIcon } from "lucide-react";
 
 import {
   UploadIcon,
@@ -22,8 +22,121 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const DIAGNOSIS_KEY = "pulmo-last-diagnosis";
+const ACTIVE_JOB_KEY = "pulmo-active-job";
+const DIAGNOSIS_START_KEY = "pulmo-diagnosis-start";
+const PROCESSING_TIME_KEY = "pulmo-processing-time";
 const MAX_FILES = 10;
 const MAX_MB = 10;
+
+const IDB_NAME = "pulmo-ai";
+const IDB_VERSION = 1;
+const IDB_STORE = "pending-files";
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE, { keyPath: "id" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbSaveFiles(files) {
+  try {
+    const db = await idbOpen();
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put({ id: "current", files });
+    await new Promise((res, rej) => {
+      tx.oncomplete = res;
+      tx.onerror = () => rej(tx.error);
+    });
+    db.close();
+  } catch (e) {
+    console.warn("idbSaveFiles failed:", e);
+  }
+}
+
+async function idbLoadFiles() {
+  try {
+    const db = await idbOpen();
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get("current");
+    const result = await new Promise((res) => {
+      req.onsuccess = () => res(req.result?.files ?? []);
+      req.onerror = () => res([]);
+    });
+    db.close();
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+async function idbClearFiles() {
+  try {
+    const db = await idbOpen();
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete("current");
+    await new Promise((res) => {
+      tx.oncomplete = res;
+      tx.onerror = res;
+    });
+    db.close();
+  } catch {
+    /* non-fatal */
+  }
+}
+
+async function idbSaveLog(steps) {
+  try {
+    const db = await idbOpen();
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put({ id: "current-log", steps });
+    await new Promise((res, rej) => {
+      tx.oncomplete = res;
+      tx.onerror = () => rej(tx.error);
+    });
+    db.close();
+  } catch (e) {
+    console.warn("idbSaveLog failed:", e);
+  }
+}
+
+async function idbLoadLog() {
+  try {
+    const db = await idbOpen();
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get("current-log");
+    const result = await new Promise((res) => {
+      req.onsuccess = () => res(req.result?.steps ?? []);
+      req.onerror = () => res([]);
+    });
+    db.close();
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+async function idbClearLog() {
+  try {
+    const db = await idbOpen();
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete("current-log");
+    await new Promise((res) => {
+      tx.oncomplete = res;
+      tx.onerror = res;
+    });
+    db.close();
+  } catch {
+    /* non-fatal */
+  }
+}
 
 const DETECTABLE_CONDITIONS = [
   "Healthy",
@@ -36,9 +149,7 @@ const DETECTABLE_CONDITIONS = [
   "Bronchiolitis",
 ];
 
-const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-
-// Read persisted diagnosis once at load time — avoids setState-in-effect warning
+// Read persisted diagnosis once at load time avoids setState-in-effect warning
 function loadStoredResult() {
   try {
     const saved = localStorage.getItem(DIAGNOSIS_KEY);
@@ -205,10 +316,12 @@ function downloadPDF(result) {
 // FileItem
 
 function FileItem({ file, index, onRemove }) {
+  const isMetadata = Boolean(file.isMetadata);
   const [audioUrl, setAudioUrl] = useState(null);
   const [showPlayer, setShowPlayer] = useState(false);
 
   const togglePlayer = () => {
+    if (isMetadata) return;
     if (!showPlayer && !audioUrl) setAudioUrl(URL.createObjectURL(file));
     setShowPlayer((p) => !p);
   };
@@ -230,6 +343,7 @@ function FileItem({ file, index, onRemove }) {
         borderRadius: 12,
         padding: 11,
         marginBottom: 6,
+        opacity: isMetadata ? 0.75 : 1,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
@@ -269,34 +383,38 @@ function FileItem({ file, index, onRemove }) {
           </p>
         </div>
 
-        <button
-          onClick={togglePlayer}
-          className="btn-ghost"
-          style={{ padding: "3px 8px", fontSize: "var(--fs-xs)" }}
-        >
-          {showPlayer ? "Hide" : "Preview"}
-        </button>
+        {!isMetadata && (
+          <button
+            onClick={togglePlayer}
+            className="btn-ghost"
+            style={{ padding: "3px 8px", fontSize: "var(--fs-xs)" }}
+          >
+            {showPlayer ? "Hide" : "Preview"}
+          </button>
+        )}
 
-        <button
-          onClick={() => onRemove(index)}
-          title="Remove file"
-          style={{
-            background: "transparent",
-            border: "none",
-            cursor: "pointer",
-            color: "var(--danger)",
-            display: "flex",
-            alignItems: "center",
-            padding: 4,
-            borderRadius: 7,
-            opacity: 0.65,
-            transition: "opacity 0.14s ease",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.65")}
-        >
-          <TrashIcon style={{ width: 14, height: 14 }} strokeWidth={2} />
-        </button>
+        {!isMetadata && (
+          <button
+            onClick={() => onRemove(index)}
+            title="Remove file"
+            style={{
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              color: "var(--danger)",
+              display: "flex",
+              alignItems: "center",
+              padding: 4,
+              borderRadius: 7,
+              opacity: 0.65,
+              transition: "opacity 0.14s ease",
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+            onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.65")}
+          >
+            <TrashIcon style={{ width: 14, height: 14 }} strokeWidth={2} />
+          </button>
+        )}
       </div>
 
       {showPlayer && audioUrl && (
@@ -330,6 +448,7 @@ function InputSection({
   onRemoveFile,
   onRunDiagnosis,
   onReset,
+  onCancel,
   onGoToSamples,
 }) {
   const fileInputRef = useRef(null);
@@ -340,7 +459,7 @@ function InputSection({
   };
 
   return (
-    <div className="med-card" style={{ padding: 20 }}>
+    <div className="med-card input-card-shell" style={{ padding: 20 }}>
       {/* Section Header */}
       <div
         style={{
@@ -379,6 +498,7 @@ function InputSection({
         <button
           className="btn-ghost"
           onClick={onGoToSamples}
+          disabled={isRunning}
           style={{
             padding: "5px 10px",
             fontSize: "var(--fs-xs)",
@@ -390,6 +510,8 @@ function InputSection({
             display: "flex",
             alignItems: "center",
             gap: 6,
+            opacity: isRunning ? 0.45 : 1,
+            cursor: isRunning ? "not-allowed" : "pointer",
           }}
         >
           <StethoscopeIcon style={{ width: 12, height: 12 }} strokeWidth={2} />
@@ -404,6 +526,7 @@ function InputSection({
         onDragLeave={onDragLeave}
         onDrop={onDrop}
         onClick={() => !isRunning && fileInputRef.current?.click()}
+        style={isRunning ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
       >
         <UploadIcon
           style={{
@@ -415,7 +538,14 @@ function InputSection({
           }}
           strokeWidth={1.5}
         />
-        <p style={{ fontSize: "var(--fs-base)", fontWeight: 500, color: "var(--text-h)", marginBottom: 4 }}>
+        <p
+          style={{
+            fontSize: "var(--fs-base)",
+            fontWeight: 500,
+            color: "var(--text-h)",
+            marginBottom: 4,
+          }}
+        >
           Drop WAV files here or click to browse
         </p>
         <p style={{ fontSize: "var(--fs-sm)", color: "var(--text)", opacity: 0.6 }}>
@@ -439,7 +569,14 @@ function InputSection({
             style={{ width: 13, height: 13, color: "var(--accent)", flexShrink: 0, marginTop: 1 }}
             strokeWidth={2}
           />
-          <p style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.7, lineHeight: 1.55 }}>
+          <p
+            style={{
+              fontSize: "var(--fs-xs)",
+              color: "var(--text)",
+              opacity: 0.7,
+              lineHeight: 1.55,
+            }}
+          >
             Use stethoscope or lung sound device recordings for best results.
           </p>
         </div>
@@ -457,7 +594,14 @@ function InputSection({
       {/* File List */}
       {files.length > 0 && (
         <div style={{ marginTop: 14 }}>
-          <p style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.6, marginBottom: 8 }}>
+          <p
+            style={{
+              fontSize: "var(--fs-xs)",
+              color: "var(--text)",
+              opacity: 0.6,
+              marginBottom: 8,
+            }}
+          >
             {files.length} / {MAX_FILES} file{files.length !== 1 ? "s" : ""} selected
           </p>
 
@@ -476,6 +620,9 @@ function InputSection({
         </div>
       )}
 
+      {/* Spacer pushes action button to bottom of card */}
+      <div style={{ flex: 1 }} />
+
       {/* Action Button */}
       {diagnosisComplete ? (
         <button
@@ -486,37 +633,48 @@ function InputSection({
           <RotateCcwIcon style={{ width: 14, height: 14 }} strokeWidth={2.5} />
           Run New Diagnosis
         </button>
+      ) : isRunning ? (
+        <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+          <button className="btn-primary" disabled style={{ flex: 1, justifyContent: "center" }}>
+            <div className="ai-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+            Analyzing...
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={onCancel}
+            style={{ flexShrink: 0, width: 94, justifyContent: "center" }}
+          >
+            <XCircleIcon style={{ width: 14, height: 14 }} strokeWidth={2} />
+            Cancel
+          </button>
+        </div>
       ) : (
         <button
           className="btn-primary"
           onClick={onRunDiagnosis}
-          disabled={files.length === 0 || isRunning}
+          disabled={files.length === 0}
           style={{ marginTop: 14, width: "100%", justifyContent: "center" }}
         >
-          {isRunning ? (
-            <>
-              <div className="ai-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
-              Analyzing...
-            </>
-          ) : (
-            <>
-              <DiagnoseIcon style={{ width: 14, height: 14 }} strokeWidth={2} />
-              Run Diagnosis
-            </>
-          )}
+          <DiagnoseIcon style={{ width: 14, height: 14 }} strokeWidth={2} />
+          Run Diagnosis
         </button>
       )}
     </div>
   );
 }
 
-function DiagnosisProgress() {
-  const [elapsed, setElapsed] = useState(0);
+function DiagnosisProgress({ startTime }) {
+  const getElapsed = useCallback(() => {
+    if (!startTime) return 0;
+    return Math.floor((Date.now() - startTime) / 1000);
+  }, [startTime]);
+
+  const [elapsed, setElapsed] = useState(getElapsed);
 
   useEffect(() => {
-    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    const id = setInterval(() => setElapsed(getElapsed()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [getElapsed]);
 
   const mins = Math.floor(elapsed / 60);
   const secs = elapsed % 60;
@@ -532,13 +690,54 @@ function DiagnosisProgress() {
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: 16,
+        gap: 14,
       }}
     >
-      <div className="ai-spinner" style={{ width: 36, height: 36 }} />
+      <div
+        style={{
+          position: "relative",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: -10,
+            right: -10,
+            bottom: -10,
+            left: -10,
+            borderRadius: 26,
+            border: "2px solid var(--accent)",
+            animation: "lungPulseRing 2.4s ease-in-out infinite",
+            pointerEvents: "none",
+          }}
+        />
+        <div
+          style={{
+            width: 74,
+            height: 74,
+            borderRadius: 22,
+            background: "var(--accent-bg)",
+            border: "1px solid var(--accent-border)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <LungsIcon
+            className="lung-breath"
+            style={{ width: 42, height: 42, color: "var(--accent)" }}
+            strokeWidth={1.5}
+          />
+        </div>
+      </div>
+
+      <div className="ai-spinner" style={{ width: 30, height: 30, marginTop: 6 }} />
 
       <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text-h)" }}>
-        Analysing audio samples…
+        Analyzing audio samples...
       </p>
 
       <div
@@ -552,15 +751,19 @@ function DiagnosisProgress() {
           gap: 10,
         }}
       >
-        <p style={{ fontSize: 12, color: "var(--text)", opacity: 0.7 }}>
-          Processing time
-        </p>
-        <p style={{ fontSize: 13, fontWeight: 700, color: "var(--accent)", fontFamily: "monospace" }}>
-          {timeStr}
-        </p>
+        <p style={{ fontSize: 12, color: "var(--text)", opacity: 0.7 }}>Processing time</p>
+        <p style={{ fontSize: 13, fontWeight: 700, color: "var(--accent)" }}>{timeStr}</p>
       </div>
 
-      <p style={{ fontSize: 12, color: "var(--text)", opacity: 0.45, textAlign: "center", lineHeight: 1.6 }}>
+      <p
+        style={{
+          fontSize: 12,
+          color: "var(--text)",
+          opacity: 0.45,
+          textAlign: "center",
+          lineHeight: 1.6,
+        }}
+      >
         This may take a moment depending on the number
         <br />
         of files and server load. Please hold on.
@@ -571,7 +774,7 @@ function DiagnosisProgress() {
 
 // OutputSection
 
-function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }) {
+function OutputSection({ result, isRunning, error, startTime, onViewReport, onDownloadPDF }) {
   // Empty state
   if (!error && !isRunning && !result) {
     return (
@@ -628,7 +831,14 @@ function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }
             />
           </div>
 
-          <p style={{ fontSize: "var(--fs-md)", fontWeight: 600, color: "var(--text-h)", marginBottom: 5 }}>
+          <p
+            style={{
+              fontSize: "var(--fs-md)",
+              fontWeight: 600,
+              color: "var(--text-h)",
+              marginBottom: 5,
+            }}
+          >
             No diagnosis yet
           </p>
           <p
@@ -704,7 +914,9 @@ function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }
             style={{ width: 17, height: 17, color: "var(--danger)", flexShrink: 0, marginTop: 1 }}
             strokeWidth={2}
           />
-          <p style={{ fontSize: "var(--fs-base)", color: "var(--danger)", lineHeight: 1.55 }}>{error}</p>
+          <p style={{ fontSize: "var(--fs-base)", color: "var(--danger)", lineHeight: 1.55 }}>
+            {error}
+          </p>
         </div>
       </div>
     );
@@ -712,7 +924,7 @@ function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }
 
   // Loading state
   if (isRunning && !result) {
-    return <DiagnosisProgress />;
+    return <DiagnosisProgress startTime={startTime} />;
   }
 
   if (!result) return null;
@@ -743,14 +955,29 @@ function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }
           {result.isStored ? "Previous Diagnosis" : "Diagnosis Result"}
         </p>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {result.processingTime && !result.isStored && (
-            <span style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.45, fontFamily: "monospace" }}>
-              {result.processingTime}
+          {result.diagnosedAt && (
+            <span style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.45 }}>
+              {new Date(result.diagnosedAt).toLocaleString([], {
+                month: "short",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
             </span>
           )}
-          {result.isStored && result.diagnosedAt && (
-            <span style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.45 }}>
-              {new Date(result.diagnosedAt).toLocaleDateString()}
+          {result.processingTime && (
+            <span
+              style={{
+                fontSize: "var(--fs-xs)",
+                color: "var(--text)",
+                opacity: 0.45,
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <span style={{ opacity: 0.7 }}>Took</span>
+              {result.processingTime}
             </span>
           )}
         </div>
@@ -870,7 +1097,12 @@ function OutputSection({ result, isRunning, error, onViewReport, onDownloadPDF }
                   {s.filename}
                 </span>
                 <span
-                  style={{ fontSize: "var(--fs-sm)", fontWeight: 600, color: "var(--text-h)", flexShrink: 0 }}
+                  style={{
+                    fontSize: "var(--fs-sm)",
+                    fontWeight: 600,
+                    color: "var(--text-h)",
+                    flexShrink: 0,
+                  }}
                 >
                   {s.prediction}
                 </span>
@@ -966,7 +1198,9 @@ function ProcessingSection({ steps, isRunning, isOpen, onToggle }) {
         >
           Processing Log
         </span>
-        <span style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.45, marginRight: 5 }}>
+        <span
+          style={{ fontSize: "var(--fs-xs)", color: "var(--text)", opacity: 0.45, marginRight: 5 }}
+        >
           {steps.length} step{steps.length !== 1 ? "s" : ""}
         </span>
         {isOpen ? (
@@ -1057,7 +1291,9 @@ function ReportModal({ result, onClose }) {
             flexShrink: 0,
           }}
         >
-          <h3 style={{ margin: 0, fontSize: "var(--fs-md)", fontWeight: 700 }}>Full Diagnosis Report</h3>
+          <h3 style={{ margin: 0, fontSize: "var(--fs-md)", fontWeight: 700 }}>
+            Full Diagnosis Report
+          </h3>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button
               className="btn-secondary"
@@ -1157,7 +1393,7 @@ function ReportModal({ result, onClose }) {
                 >
                   Processing Time
                 </p>
-                <p style={{ fontSize: "var(--fs-sm)", fontWeight: 500, color: "var(--text-h)", fontFamily: "monospace" }}>
+                <p style={{ fontSize: "var(--fs-sm)", fontWeight: 500, color: "var(--text-h)" }}>
                   {result.processingTime}
                 </p>
               </div>
@@ -1338,10 +1574,24 @@ function ReportModal({ result, onClose }) {
               padding: 14,
             }}
           >
-            <p style={{ fontSize: "var(--fs-xs)", fontWeight: 700, color: "var(--danger)", marginBottom: 6 }}>
+            <p
+              style={{
+                fontSize: "var(--fs-xs)",
+                fontWeight: 700,
+                color: "var(--danger)",
+                marginBottom: 6,
+              }}
+            >
               Disclaimer
             </p>
-            <p style={{ fontSize: "var(--fs-sm)", color: "var(--danger)", opacity: 0.8, lineHeight: 1.65 }}>
+            <p
+              style={{
+                fontSize: "var(--fs-sm)",
+                color: "var(--danger)",
+                opacity: 0.8,
+                lineHeight: 1.65,
+              }}
+            >
               This report is generated by Pulmo AI for educational and research purposes only. The
               AI model was trained on a limited and imbalanced lung sound dataset (ICBHI 2017),
               which may lead to inaccurate predictions. Recording quality strongly affects
@@ -1363,16 +1613,47 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
-  const [diagnosisComplete, setDiagnosisComplete] = useState(false);
+  const [diagnosisComplete, setDiagnosisComplete] = useState(
+    () => !localStorage.getItem(ACTIVE_JOB_KEY) && localStorage.getItem(DIAGNOSIS_KEY) !== null,
+  );
   const [processingSteps, setProcessingSteps] = useState([]);
   const [processingOpen, setProcessingOpen] = useState(false);
+  const [activeJobId, setActiveJobId] = useState(null);
+  const [startTime, setStartTime] = useState(() => {
+    const saved = parseInt(localStorage.getItem(DIAGNOSIS_START_KEY) || "0");
+    return saved > 0 ? saved : null;
+  });
   const [error, setError] = useState(null);
   const [showReport, setShowReport] = useState(false);
 
-  // Lazy initializer reads localStorage once at mount — no useEffect, no cascade
-  const [result, setResult] = useState(loadStoredResult);
+  const [result, setResult] = useState(() => {
+    if (localStorage.getItem(ACTIVE_JOB_KEY)) return null;
+    return loadStoredResult();
+  });
 
   const outputRef = useRef(null);
+  const _savedStart = parseInt(localStorage.getItem(DIAGNOSIS_START_KEY) || "0");
+  const startTimeRef = useRef(_savedStart > 0 ? _savedStart : null);
+  // Prevents the async mount IDB load from overriding files already set by runDiagnosis
+  const runDiagnosisCalledRef = useRef(false);
+
+  const handleCancel = async () => {
+    if (activeJobId) {
+      try {
+        await fetch(`${API_BASE}/job/${activeJobId}/cancel`, { method: "POST" });
+      } catch {
+        /* ignore */
+      }
+    }
+    setIsRunning(false);
+    setActiveJobId(null);
+    setProcessingSteps([]);
+    setProcessingOpen(false);
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    localStorage.removeItem(DIAGNOSIS_START_KEY);
+    localStorage.removeItem(PROCESSING_TIME_KEY);
+    idbClearLog();
+  };
 
   const handleReset = () => {
     setFiles([]);
@@ -1381,7 +1662,15 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
     setError(null);
     setDiagnosisComplete(false);
     setProcessingOpen(false);
+    setActiveJobId(null);
+    setStartTime(null);
+    startTimeRef.current = null;
     localStorage.removeItem(DIAGNOSIS_KEY);
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+    localStorage.removeItem(DIAGNOSIS_START_KEY);
+    localStorage.removeItem(PROCESSING_TIME_KEY);
+    idbClearFiles();
+    idbClearLog();
   };
 
   const addFiles = (incoming) => {
@@ -1390,7 +1679,6 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
       .filter((f) => f.size <= MAX_MB * 1024 * 1024);
     if (!valid.length) return;
 
-    // Reset state if a new upload follows a completed diagnosis
     if (diagnosisComplete) {
       setResult(null);
       setProcessingSteps([]);
@@ -1398,6 +1686,7 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
       setDiagnosisComplete(false);
       setProcessingOpen(false);
       localStorage.removeItem(DIAGNOSIS_KEY);
+      localStorage.removeItem(ACTIVE_JOB_KEY);
       setFiles(valid.slice(0, MAX_FILES));
     } else {
       setFiles((prev) => [...prev, ...valid].slice(0, MAX_FILES));
@@ -1409,6 +1698,7 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   };
 
   const handleDragOver = (e) => {
+    if (isRunning) return;
     e.preventDefault();
     setIsDragging(true);
   };
@@ -1416,19 +1706,28 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   const handleDrop = (e) => {
     e.preventDefault();
     setIsDragging(false);
+    if (isRunning) return;
     addFiles(Array.from(e.dataTransfer.files));
   };
 
-  // Accepts an optional File[] override — used by both the button and the auto-test effect
   const runDiagnosis = async (overrideFiles) => {
     const filesToRun = Array.isArray(overrideFiles) ? overrideFiles : files;
     if (filesToRun.length === 0 || isRunning) return;
 
-    // Populate the input panel immediately so the user sees the files
-    if (Array.isArray(overrideFiles)) setFiles(overrideFiles);
+    // Mark immediately so the mount IDB callback cannot race and override these files
+    runDiagnosisCalledRef.current = true;
 
-    const diagnosisStart = Date.now();
+    if (Array.isArray(overrideFiles)) {
+      setFiles(overrideFiles);
+    }
 
+    localStorage.removeItem(DIAGNOSIS_KEY);
+    localStorage.removeItem(ACTIVE_JOB_KEY);
+
+    const now = Date.now();
+    startTimeRef.current = now;
+    setStartTime(now);
+    localStorage.setItem(DIAGNOSIS_START_KEY, String(now));
     setIsRunning(true);
     setProcessingSteps([]);
     setError(null);
@@ -1436,7 +1735,6 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
     setDiagnosisComplete(false);
     setProcessingOpen(true);
 
-    // Scroll output into view on mobile as soon as diagnosis starts
     if (window.innerWidth < 640 && outputRef.current) {
       setTimeout(() => {
         const elementTop = outputRef.current.getBoundingClientRect().top + window.pageYOffset;
@@ -1450,6 +1748,10 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
         if (f instanceof File) formData.append("files", f);
       });
 
+      await idbClearFiles();
+      await idbClearLog();
+      await idbSaveFiles(filesToRun.filter((f) => f instanceof File));
+
       const response = await fetch(`${API_BASE}/predict`, {
         method: "POST",
         body: formData,
@@ -1461,49 +1763,176 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
       }
 
       const data = await response.json();
+      // data = { job_id: "...", status: "queued" }
 
-      for (const step of data.processing_steps || []) {
-        await sleep(55);
-        setProcessingSteps((prev) => [...prev, step]);
-      }
-
-      const processingMs = Date.now() - diagnosisStart;
-      const processingTime =
-        processingMs < 60000
-          ? `${(processingMs / 1000).toFixed(1)}s`
-          : `${Math.floor(processingMs / 60000)}m ${((processingMs % 60000) / 1000).toFixed(0)}s`;
-
-      const resultData = {
-        ...data,
-        diagnosedAt: new Date().toISOString(),
-        processingTime,
-        isStored: false,
-      };
-
-      localStorage.setItem(DIAGNOSIS_KEY, JSON.stringify(resultData));
-      setResult(resultData);
-      setDiagnosisComplete(true);
-
-      // Scroll output into view on mobile after result arrives
-      if (window.innerWidth < 640 && outputRef.current) {
-        setTimeout(() => {
-          const elementTop = outputRef.current.getBoundingClientRect().top + window.pageYOffset;
-          window.scrollTo({ top: elementTop - 88, behavior: "smooth" });
-        }, 200);
-      }
+      localStorage.setItem(ACTIVE_JOB_KEY, data.job_id);
+      setActiveJobId(data.job_id);
     } catch (err) {
       setError(err.message);
-    } finally {
       setIsRunning(false);
+      setStartTime(null);
+      startTimeRef.current = null;
+      localStorage.removeItem(ACTIVE_JOB_KEY);
+      localStorage.removeItem(DIAGNOSIS_START_KEY);
     }
   };
 
-  // When Home passes files via autoTestFiles, load and run immediately
-  // Captures the array locally and clears parent state so this fires only once
+  // On mount: restore last submitted files and processing log from IndexedDB.
+  // runDiagnosisCalledRef prevents this async callback from overriding files
+  // that runDiagnosis has already set when autoTestFiles fires on the same mount.
+  // If a job is still running, the reconnect effect will overwrite processingSteps
+  // with live server data, so restoring stale log here causes no conflict.
+  useEffect(() => {
+    let mounted = true;
+    Promise.all([idbLoadFiles(), idbLoadLog()]).then(([savedFiles, savedLog]) => {
+      if (!mounted) return;
+      if (!runDiagnosisCalledRef.current && savedFiles.length > 0) setFiles(savedFiles);
+      if (savedLog.length > 0) {
+        setProcessingSteps(savedLog);
+        setProcessingOpen(true);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // On mount: reconnect to an in-progress job if one was left running (navigation or reload)
+  useEffect(() => {
+    const savedJobId = localStorage.getItem(ACTIVE_JOB_KEY);
+    if (!savedJobId) return;
+
+    fetch(`${API_BASE}/job/${savedJobId}`)
+      .then((r) => r.json())
+      .then(async (job) => {
+        if (job.status === "queued" || job.status === "running") {
+          // Use the client-side timestamp stored at diagnosis start never parse
+          // job.created_at here because Python's datetime.utcnow().isoformat() has
+          // no 'Z' suffix so JS treats it as local time, producing a wildly wrong
+          // elapsed value (e.g. 330m for a user in UTC+5:30).
+          const savedStart = parseInt(localStorage.getItem(DIAGNOSIS_START_KEY) || "0");
+          const t = savedStart > 0 ? savedStart : Date.now();
+          startTimeRef.current = t;
+          setStartTime(t);
+          setActiveJobId(savedJobId);
+          setIsRunning(true);
+          setProcessingSteps(job.processing_steps || []);
+          setProcessingOpen(true);
+
+          // Restore uploaded files from IndexedDB back into the input section
+          const savedFiles = await idbLoadFiles();
+          if (savedFiles.length > 0) {
+            setFiles(savedFiles);
+          }
+        } else if (job.status === "completed" && job.result) {
+          // Job finished while the user was on another page; show the result immediately.
+          // This is the case that was previously silently discarding the completed result.
+          const processingTime = job.result.processing_time_server || null;
+
+          const resultData = {
+            ...job.result,
+            diagnosedAt: new Date().toISOString(),
+            ...(processingTime ? { processingTime } : {}),
+            isStored: false,
+          };
+
+          localStorage.setItem(DIAGNOSIS_KEY, JSON.stringify(resultData));
+          localStorage.removeItem(ACTIVE_JOB_KEY);
+          localStorage.removeItem(DIAGNOSIS_START_KEY);
+
+          setResult(resultData);
+          setDiagnosisComplete(true);
+          setProcessingSteps(job.processing_steps || []);
+          setProcessingOpen((job.processing_steps || []).length > 0);
+        } else if (job.status === "failed") {
+          setError(job.error || "Diagnosis failed.");
+          localStorage.removeItem(ACTIVE_JOB_KEY);
+          localStorage.removeItem(DIAGNOSIS_START_KEY);
+        } else {
+          // cancelled or any other terminal state
+          localStorage.removeItem(ACTIVE_JOB_KEY);
+          localStorage.removeItem(DIAGNOSIS_START_KEY);
+        }
+      })
+      .catch(() => {
+        localStorage.removeItem(ACTIVE_JOB_KEY);
+        localStorage.removeItem(DIAGNOSIS_START_KEY);
+      });
+  }, []);
+
+  // Poll active job every 1s for live steps and final result
+  useEffect(() => {
+    if (!activeJobId) return;
+
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/job/${activeJobId}`);
+        if (!res.ok) return;
+        const job = await res.json();
+
+        setProcessingSteps(job.processing_steps || []);
+        if ((job.processing_steps || []).length > 0) {
+          idbSaveLog(job.processing_steps);
+        }
+
+        if (job.status === "completed") {
+          clearInterval(poll);
+
+          const processingTime = job.result.processing_time_server || null;
+
+          const resultData = {
+            ...job.result,
+            diagnosedAt: new Date().toISOString(),
+            ...(processingTime ? { processingTime } : {}),
+            isStored: false,
+          };
+
+          localStorage.setItem(DIAGNOSIS_KEY, JSON.stringify(resultData));
+          localStorage.removeItem(ACTIVE_JOB_KEY);
+          localStorage.removeItem(DIAGNOSIS_START_KEY);
+
+          setResult(resultData);
+          setDiagnosisComplete(true);
+          setIsRunning(false);
+          setActiveJobId(null);
+
+          if (window.innerWidth < 640 && outputRef.current) {
+            setTimeout(() => {
+              const elementTop = outputRef.current.getBoundingClientRect().top + window.pageYOffset;
+              window.scrollTo({ top: elementTop - 88, behavior: "smooth" });
+            }, 200);
+          }
+        } else if (job.status === "failed") {
+          clearInterval(poll);
+          setError(job.error || "Diagnosis failed.");
+          setIsRunning(false);
+          setActiveJobId(null);
+          localStorage.removeItem(ACTIVE_JOB_KEY);
+          localStorage.removeItem(DIAGNOSIS_START_KEY);
+        } else if (job.status === "cancelled") {
+          clearInterval(poll);
+          setIsRunning(false);
+          setActiveJobId(null);
+          setProcessingSteps([]);
+          setProcessingOpen(false);
+          localStorage.removeItem(ACTIVE_JOB_KEY);
+          localStorage.removeItem(DIAGNOSIS_START_KEY);
+        }
+      } catch {
+        // Network hiccup keep trying
+      }
+    }, 1000);
+
+    return () => clearInterval(poll);
+  }, [activeJobId]);
+
+  // When Home passes files via autoTestFiles, clear any previous job then run immediately
   useEffect(() => {
     if (!autoTestFiles?.length) return;
     const testFiles = autoTestFiles;
     onClearAutoTest?.();
+    localStorage.removeItem(DIAGNOSIS_KEY);
+    localStorage.removeItem(ACTIVE_JOB_KEY);
     const timer = setTimeout(() => runDiagnosis(testFiles), 0);
     return () => clearTimeout(timer);
   }, [autoTestFiles]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1513,7 +1942,7 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   return (
     <>
       {/* Two Panel Layout */}
-      <div className="page-grid" style={{ alignItems: "stretch" }}>
+      <div className="page-grid stretch-cols">
         <InputSection
           files={files}
           isDragging={isDragging}
@@ -1526,22 +1955,27 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
           onRemoveFile={removeFile}
           onRunDiagnosis={runDiagnosis}
           onReset={handleReset}
+          onCancel={handleCancel}
           onGoToSamples={() => navigate?.("samples")}
         />
 
-        {/* Output Panel — ref used for mobile scroll-into-view */}
-        <div ref={outputRef} style={{ display: "flex", flexDirection: "column" }}>
+        {/* Output Panel ref used for mobile scroll-into-view */}
+        <div
+          ref={outputRef}
+          style={{ display: "flex", flexDirection: "column", minWidth: 0, height: "100%" }}
+        >
           <OutputSection
             result={result}
             isRunning={isRunning}
             error={error}
+            startTime={startTime}
             onViewReport={() => setShowReport(true)}
             onDownloadPDF={() => result && downloadPDF(result)}
           />
         </div>
       </div>
 
-      {/* Processing Log — collapsible, full width */}
+      {/* Processing Log collapsible, full width */}
       {hasProcessingContent && (
         <ProcessingSection
           steps={processingSteps}

@@ -189,6 +189,7 @@ p {
   font-size: 12px;
   line-height: 1.8;
   max-height: 220px;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 14px 16px;
   background: var(--card2);
@@ -228,6 +229,34 @@ p {
   50% {
     opacity: 0;
   }
+}
+
+@keyframes lungsBreath {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.13);
+    opacity: 1;
+  }
+}
+
+@keyframes lungPulseRing {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.28;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.1;
+  }
+}
+
+.lung-breath {
+  animation: lungsBreath 2.4s ease-in-out infinite;
 }
 
 /* Drop zone */
@@ -428,6 +457,22 @@ p {
   grid-template-columns: 1fr;
   gap: 16px;
   align-items: start;
+}
+
+@media (min-width: 640px) {
+  .page-grid.stretch-cols {
+    align-items: stretch;
+  }
+}
+
+.input-card-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.page-grid > * {
+  min-width: 0;
 }
 
 @media (min-width: 640px) {
