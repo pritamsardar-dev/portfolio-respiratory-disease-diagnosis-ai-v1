@@ -1,10 +1,15 @@
 from contextlib import asynccontextmanager
 from typing import List
 
+import asyncio
+import threading
+import time
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from predictor import load_models, run_diagnosis
+from jobs import create_job, get_job, update_job
 
 MAX_FILES = 10
 MAX_FILE_SIZE_MB = 10
@@ -39,6 +44,63 @@ app.add_middleware(
 @app.get("/health")
 def health_check():
     return {"status": "ok", "model": "loaded"}
+
+
+async def run_job(job_id: str, file_data: list) -> None:
+    job = get_job(job_id)
+    start_ts = time.time()
+
+    try:
+        update_job(job_id, status="running")
+
+        def progress_callback(steps):
+            update_job(job_id, processing_steps=steps)
+
+        result = await asyncio.to_thread(
+            run_diagnosis,
+            file_data,
+            job["cancel_event"],
+            progress_callback,
+        )
+
+        processing_ms = (time.time() - start_ts) * 1000
+        if processing_ms < 60_000:
+            processing_time = f"{processing_ms / 1000:.1f}s"
+        else:
+            mins = int(processing_ms // 60_000)
+            secs = int((processing_ms % 60_000) / 1000)
+            processing_time = f"{mins}m {secs}s"
+
+        result["processing_time_server"] = processing_time
+        update_job(job_id, status="completed", result=result)
+
+    except Exception as exc:
+        update_job(job_id, status="failed", error=str(exc))
+
+
+@app.get("/job/{job_id}")
+def get_job_status(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "created_at": job["created_at"],
+        "processing_steps": job.get("processing_steps", []),
+        "result": job["result"],
+        "error": job["error"],
+    }
+
+
+@app.post("/job/{job_id}/cancel")
+def cancel_job(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job["cancel_event"].set()
+    update_job(job_id, status="cancelled")
+    return {"success": True}
 
 
 @app.post("/predict")
@@ -79,10 +141,6 @@ async def predict(files: List[UploadFile] = File(...)):
             }
         )
 
-    # Run the full spectrogram + CNN diagnosis pipeline
-    try:
-        result = run_diagnosis(file_data)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Diagnosis failed during processing: {str(e)}")
-
-    return result
+    job_id = create_job()
+    asyncio.create_task(run_job(job_id, file_data))
+    return {"job_id": job_id, "status": "queued"}

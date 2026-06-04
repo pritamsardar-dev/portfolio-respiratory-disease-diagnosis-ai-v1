@@ -137,7 +137,7 @@ def _predict_spectrogram(img_path: str) -> Tuple[str, float]:
     return label, confidence
 
 
-def run_diagnosis(file_data: List[dict]) -> dict:
+def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=None) -> dict:
     """
     Full inference pipeline for one or more WAV files.
     Each file is segmented, converted to spectrograms, and classified per segment.
@@ -150,10 +150,18 @@ def run_diagnosis(file_data: List[dict]) -> dict:
     steps = []
 
     steps.append(f"Received {len(file_data)} audio file(s) for processing")
-    steps.append("Validating inputs — format and size checks passed")
+    if progress_callback:
+        progress_callback(list(steps))
+    steps.append("Validating inputs: format and size checks passed")
+    if progress_callback:
+        progress_callback(list(steps))
 
     try:
         for i, item in enumerate(file_data):
+            if cancel_event and cancel_event.is_set():
+                cleanup_files(temp_files)
+                raise RuntimeError("Diagnosis was cancelled by the client.")
+
             filename = item["filename"]
             content = item["content"]
             n = i + 1
@@ -165,12 +173,18 @@ def run_diagnosis(file_data: List[dict]) -> dict:
             temp_files.append(wav_path)
 
             steps.append(f"{prefix} Loading audio: {filename}")
+            if progress_callback:
+                progress_callback(list(steps))
             steps.append(f"{prefix} Segmenting into {SEGMENT_SEC}s windows")
+            if progress_callback:
+                progress_callback(list(steps))
 
             seg_pngs = _wav_to_segment_spectrograms(wav_path)
             temp_files.extend(seg_pngs)
 
             steps.append(f"{prefix} Generated {len(seg_pngs)} segment(s) — running CNN on each")
+            if progress_callback:
+                progress_callback(list(steps))
 
             # Majority vote across segments for this file
             seg_labels = []
@@ -186,6 +200,8 @@ def run_diagnosis(file_data: List[dict]) -> dict:
                 f"{prefix} File prediction: {file_label} "
                 f"({seg_labels.count(file_label)}/{len(seg_labels)} segments agree)"
             )
+            if progress_callback:
+                progress_callback(list(steps))
             samples.append(
                 {
                     "filename": filename,
@@ -197,6 +213,8 @@ def run_diagnosis(file_data: List[dict]) -> dict:
 
         # Majority vote across all uploaded files for the final diagnosis
         steps.append("Aggregating across all files via majority voting")
+        if progress_callback:
+            progress_callback(list(steps))
         final_prediction = Counter(predictions).most_common(1)[0][0]
 
         info = DISEASE_INFO.get(
@@ -209,11 +227,19 @@ def run_diagnosis(file_data: List[dict]) -> dict:
         )
 
         steps.append(f"Final diagnosis: {final_prediction}")
+        if progress_callback:
+            progress_callback(list(steps))
         steps.append(f"Removing {len(temp_files)} temporary file(s)")
+        if progress_callback:
+            progress_callback(list(steps))
         removed = cleanup_files(temp_files)
         temp_files = []
         steps.append(f"Cleanup complete — {removed} file(s) removed")
+        if progress_callback:
+            progress_callback(list(steps))
         steps.append("Processing finished successfully")
+        if progress_callback:
+            progress_callback(list(steps))
 
         return {
             "success": True,
