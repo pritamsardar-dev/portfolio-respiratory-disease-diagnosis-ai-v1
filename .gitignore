@@ -31,6 +31,10 @@ yarn-debug.log*
 pnpm-debug.log*
 server/logs/
 
+# Temporary diagnosis files
+server/temp/*
+!server/temp/.gitkeep
+
 # ML generated outputs
 server/results/
 server/diagnosis/
