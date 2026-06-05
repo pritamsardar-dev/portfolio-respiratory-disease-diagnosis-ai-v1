@@ -1803,8 +1803,16 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
     if (!savedJobId) return;
 
     fetch(`${API_BASE}/job/${savedJobId}`)
-      .then((r) => r.json())
+      .then((r) => {
+        if (r.status === 404) {
+          localStorage.removeItem(ACTIVE_JOB_KEY);
+          localStorage.removeItem(DIAGNOSIS_START_KEY);
+          return null;
+        }
+        return r.json();
+      })
       .then(async (job) => {
+        if (!job) return;
         if (job.status === "queued" || job.status === "running") {
           // Use the client-side timestamp stored at diagnosis start never parse
           // job.created_at here because Python's datetime.utcnow().isoformat() has
@@ -1867,7 +1875,17 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
     const poll = setInterval(async () => {
       try {
         const res = await fetch(`${API_BASE}/job/${activeJobId}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (res.status === 404) {
+            clearInterval(poll);
+            setIsRunning(false);
+            setActiveJobId(null);
+            setError("Diagnosis session was lost (server restarted). Please try again.");
+            localStorage.removeItem(ACTIVE_JOB_KEY);
+            localStorage.removeItem(DIAGNOSIS_START_KEY);
+          }
+          return;
+        }
         const job = await res.json();
 
         setProcessingSteps(job.processing_steps || []);
