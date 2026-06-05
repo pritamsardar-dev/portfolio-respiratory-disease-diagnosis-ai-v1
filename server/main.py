@@ -83,7 +83,8 @@ def get_job_status(job_id: str):
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {
+
+    response = {
         "job_id": job_id,
         "status": job["status"],
         "created_at": job["created_at"],
@@ -91,6 +92,13 @@ def get_job_status(job_id: str):
         "result": job["result"],
         "error": job["error"],
     }
+
+    if job["status"] == "completed":
+        from utils.db import delete_job
+
+        delete_job(job_id)
+
+    return response
 
 
 @app.post("/job/{job_id}/cancel")
