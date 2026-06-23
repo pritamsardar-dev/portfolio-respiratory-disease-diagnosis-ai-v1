@@ -9,11 +9,19 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from predictor import load_models, run_diagnosis
-from jobs import create_job, get_job, update_job
+import uuid
+from datetime import datetime, timezone
+from jobs import insert_job, fetch_job, save_job, delete_job, get_cancel_event, set_cancelled
 
 MAX_FILES = 10
 MAX_FILE_SIZE_MB = 10
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# Render's free tier gives this app 512MB RAM. Running more than one
+# diagnosis job at a time can exceed that, so jobs are processed strictly
+# one at a time. New jobs still get a job_id immediately and report
+# status "queued" until this semaphore is free.
+_processing_semaphore = asyncio.Semaphore(1)
 
 
 @asynccontextmanager
@@ -47,40 +55,46 @@ def health_check():
 
 
 async def run_job(job_id: str, file_data: list) -> None:
-    job = get_job(job_id)
-    start_ts = time.time()
+    async with _processing_semaphore:
+        # The job may have been cancelled while it was waiting in the
+        # queue behind another job -- don't overwrite that status.
+        cancel_event = get_cancel_event(job_id)
+        if cancel_event and cancel_event.is_set():
+            return
 
-    try:
-        update_job(job_id, status="running")
+        start_ts = time.time()
 
-        def progress_callback(steps):
-            update_job(job_id, processing_steps=steps)
+        try:
+            save_job(job_id, status="running")
 
-        result = await asyncio.to_thread(
-            run_diagnosis,
-            file_data,
-            job["cancel_event"],
-            progress_callback,
-        )
+            def progress_callback(steps):
+                save_job(job_id, steps=steps)
 
-        processing_ms = (time.time() - start_ts) * 1000
-        if processing_ms < 60_000:
-            processing_time = f"{processing_ms / 1000:.1f}s"
-        else:
-            mins = int(processing_ms // 60_000)
-            secs = int((processing_ms % 60_000) / 1000)
-            processing_time = f"{mins}m {secs}s"
+            result = await asyncio.to_thread(
+                run_diagnosis,
+                file_data,
+                cancel_event,
+                progress_callback,
+            )
 
-        result["processing_time_server"] = processing_time
-        update_job(job_id, status="completed", result=result)
+            processing_ms = (time.time() - start_ts) * 1000
+            if processing_ms < 60_000:
+                processing_time = f"{processing_ms / 1000:.1f}s"
+            else:
+                mins = int(processing_ms // 60_000)
+                secs = int((processing_ms % 60_000) / 1000)
+                processing_time = f"{mins}m {secs}s"
 
-    except Exception as exc:
-        update_job(job_id, status="failed", error=str(exc))
+            result["processing_time_server"] = processing_time
+            save_job(job_id, status="completed", result=result)
+
+        except Exception as exc:
+            save_job(job_id, status="failed", error=str(exc))
 
 
 @app.get("/job/{job_id}")
 def get_job_status(job_id: str):
-    job = get_job(job_id)
+    job = fetch_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -94,8 +108,6 @@ def get_job_status(job_id: str):
     }
 
     if job["status"] == "completed":
-        from jobs import delete_job
-
         delete_job(job_id)
 
     return response
@@ -103,11 +115,11 @@ def get_job_status(job_id: str):
 
 @app.post("/job/{job_id}/cancel")
 def cancel_job(job_id: str):
-    job = get_job(job_id)
+    job = fetch_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    job["cancel_event"].set()
-    update_job(job_id, status="cancelled")
+    set_cancelled(job_id)
+    save_job(job_id, status="cancelled")
     return {"success": True}
 
 
@@ -149,6 +161,7 @@ async def predict(files: List[UploadFile] = File(...)):
             }
         )
 
-    job_id = create_job()
+    job_id = str(uuid.uuid4())
+    insert_job(job_id, datetime.now(timezone.utc).isoformat())
     asyncio.create_task(run_job(job_id, file_data))
     return {"job_id": job_id, "status": "queued"}
