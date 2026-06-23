@@ -1,76 +1,85 @@
-# server/utils/jobs.py
-"""
-In-memory, thread-safe job store.
+# Hybrid job store: SQLite for durable state, memory for live progress steps.
+# SQLite writes only on status transitions, roughly 4 writes per job total.
+# Steps are in-memory only so progress callbacks never touch disk.
+# Cancel events are in-memory only, cancellation does not need to survive restarts.
 
-Drop-in replacement for utils/db.py -- zero disk I/O, zero SQLite overhead.
-On Render free tier (slow overlay FS) every save_job() call was a blocking
-disk sync; here it is a dict write under a Lock, which takes microseconds.
-
-Trade-off: jobs disappear on server restart.
-The client already handles this gracefully via the 404-recovery fix:
-  "handle job 404 gracefully when server restarts during active polling"
-so no client changes are needed.
-"""
-
+import sqlite3
+import json
+import os
 import threading
 from datetime import datetime, timedelta
 from typing import Optional
 
+DB_PATH = os.environ.get("JOB_DB_PATH", "jobs.db")
+
 _lock = threading.Lock()
-_jobs: dict = {}    # job_id -> job dict
-_events: dict = {}  # job_id -> threading.Event  (cancel signal)
+_steps: dict = {}   # job_id -> list[str], in-memory only, never written to disk
+_events: dict = {}  # job_id -> threading.Event, cancel signal, in-memory only
 
 
-# Startup / maintenance  (keep signatures identical to utils/db.py)
+def _connect() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")  # safe with WAL, faster than FULL
+    con.row_factory = sqlite3.Row
+    return con
 
 
 def init_db() -> None:
-    """No-op: on restart the dict is empty, which is correct.
-    Any in-flight jobs will 404 and the client recovers automatically."""
-    pass
+    with _connect() as con:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id         TEXT PRIMARY KEY,
+                status     TEXT NOT NULL DEFAULT 'queued',
+                result     TEXT,
+                error      TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        # Any job mid-flight when the server stopped cannot be recovered
+        con.execute(
+            "UPDATE jobs SET status = 'failed', error = 'Server restarted during processing' "
+            "WHERE status IN ('queued', 'running')"
+        )
+        con.commit()
 
 
 def purge_old_jobs(keep_hours: int = 24) -> None:
-    """Evict jobs older than keep_hours from the in-memory store."""
-    cutoff = datetime.utcnow() - timedelta(hours=keep_hours)
-    with _lock:
-        stale = [
-            jid for jid, job in _jobs.items()
-            if datetime.fromisoformat(job["created_at"]) < cutoff
-        ]
-        for jid in stale:
-            _jobs.pop(jid, None)
-            _events.pop(jid, None)
+    with _connect() as con:
+        con.execute(
+            "DELETE FROM jobs WHERE created_at < datetime('now', ?)",
+            (f"-{keep_hours} hours",),
+        )
+        con.commit()
 
-
-# CRUD  (identical signatures to utils/db.py)
 
 def insert_job(job_id: str, created_at: str) -> None:
+    with _connect() as con:
+        con.execute(
+            "INSERT INTO jobs (id, status, created_at) VALUES (?, 'queued', ?)",
+            (job_id, created_at),
+        )
+        con.commit()
     with _lock:
-        _jobs[job_id] = {
-            "id": job_id,
-            "status": "queued",
-            "steps": [],
-            "result": None,
-            "error": None,
-            "created_at": created_at,
-        }
+        _steps[job_id] = []
         _events[job_id] = threading.Event()
 
 
 def fetch_job(job_id: str) -> Optional[dict]:
+    with _connect() as con:
+        row = con.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        return None
     with _lock:
-        job = _jobs.get(job_id)
-        if job is None:
-            return None
-        return {
-            "id": job["id"],
-            "status": job["status"],
-            "processing_steps": list(job["steps"]),
-            "result": job["result"],
-            "error": job["error"],
-            "created_at": job["created_at"],
-        }
+        steps = list(_steps.get(job_id, []))
+    return {
+        "id": row["id"],
+        "status": row["status"],
+        "processing_steps": steps,
+        "result": json.loads(row["result"]) if row["result"] else None,
+        "error": row["error"],
+        "created_at": row["created_at"],
+    }
 
 
 def save_job(
@@ -80,39 +89,47 @@ def save_job(
     result: Optional[dict] = None,
     error: Optional[str] = None,
 ) -> None:
-    with _lock:
-        job = _jobs.get(job_id)
-        if job is None:
-            return
-        if status is not None:
-            job["status"] = status
-        if steps is not None:
-            job["steps"] = list(steps)
-        if result is not None:
-            job["result"] = result
-        if error is not None:
-            job["error"] = error
+    # Steps go to memory only, no disk write ever
+    if steps is not None:
+        with _lock:
+            if job_id in _steps:
+                _steps[job_id] = list(steps)
+
+    # Status, result, error go to SQLite on state transitions only
+    db_fields, db_params = [], []
+    if status is not None:
+        db_fields.append("status = ?")
+        db_params.append(status)
+    if result is not None:
+        db_fields.append("result = ?")
+        db_params.append(json.dumps(result))
+    if error is not None:
+        db_fields.append("error = ?")
+        db_params.append(error)
+    if db_fields:
+        db_params.append(job_id)
+        with _connect() as con:
+            con.execute(
+                f"UPDATE jobs SET {', '.join(db_fields)} WHERE id = ?", db_params
+            )
+            con.commit()
 
 
 def delete_job(job_id: str) -> None:
+    with _connect() as con:
+        con.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        con.commit()
     with _lock:
-        _jobs.pop(job_id, None)
-        _events.pop(job_id, None) 
+        _steps.pop(job_id, None)
+        _events.pop(job_id, None)
 
-
-# Cancel-event helpers
-# Replaces any ad-hoc _cancel_events = {} dict that lives in main.py.
-# Call get_cancel_event() where you previously did _cancel_events.get(job_id)
-# Call set_cancelled()    where you previously did _cancel_events[job_id].set()
 
 def get_cancel_event(job_id: str) -> Optional[threading.Event]:
-    """Return the cancel Event for job_id, or None if the job is unknown."""
     with _lock:
         return _events.get(job_id)
 
 
 def set_cancelled(job_id: str) -> bool:
-    """Signal cancellation. Returns True if the job existed."""
     with _lock:
         event = _events.get(job_id)
         if event is None:
