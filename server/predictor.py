@@ -18,12 +18,12 @@ from utils.cleanup import cleanup_files
 
 MODEL_PATH = "models/cnn_diagnosis_model.keras"
 ENCODER_PATH = "models/label_encoder.pkl"
-TEMP_DIR = "temp"
+TEMP_DIR = "/tmp"
 IMG_SIZE = (64, 64)  # Must match train.py IMG_SIZE
 SEGMENT_SEC = 2.0  # Window length matches breath cycle length from training
 MIN_DUR_SEC = 0.5  # Skip windows shorter than this
 
-os.makedirs(TEMP_DIR, exist_ok=True)
+# /tmp is always present on Linux; no makedirs needed
 
 _model = None
 _label_encoder = None
@@ -191,6 +191,14 @@ def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=No
             for png in seg_pngs:
                 lbl, _ = _predict_spectrogram(png)
                 seg_labels.append(lbl)
+                cleanup_files([png])
+
+            cleanup_files([wav_path])
+            for p in [wav_path] + seg_pngs:
+                try:
+                    temp_files.remove(p)
+                except ValueError:
+                    pass
 
             file_label = Counter(seg_labels).most_common(1)[0][0]
             file_confidence = seg_labels.count(file_label) / len(seg_labels)

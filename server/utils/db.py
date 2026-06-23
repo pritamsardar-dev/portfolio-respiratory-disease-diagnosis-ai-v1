@@ -1,3 +1,6 @@
+# Not currently used. jobs.py switched to an in-memory store for speed on Render.
+# Swap this back in if you need jobs to survive server restarts.
+
 import sqlite3
 import json
 import os

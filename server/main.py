@@ -94,7 +94,7 @@ def get_job_status(job_id: str):
     }
 
     if job["status"] == "completed":
-        from utils.db import delete_job
+        from jobs import delete_job
 
         delete_job(job_id)
 
