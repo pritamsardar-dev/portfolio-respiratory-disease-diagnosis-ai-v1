@@ -184,18 +184,18 @@ function AboutPage() {
             Portfolio Project
           </p>
 
-          <h1
+          <p
             style={{
-              fontSize: 22,
-              fontWeight: 800,
+              fontSize: "var(--fs-lg)",
+              fontWeight: 700,
               color: "var(--text-h)",
-              letterSpacing: "-0.03em",
-              lineHeight: 1.25,
+              letterSpacing: "-0.015em",
+              lineHeight: 1.4,
               marginBottom: 12,
             }}
           >
             Respiratory Disease Classification from Lung Audio
-          </h1>
+          </p>
 
           <p
             style={{

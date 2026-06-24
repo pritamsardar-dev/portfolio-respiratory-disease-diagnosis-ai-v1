@@ -316,7 +316,7 @@ p {
   align-items: center;
   gap: 7px;
   padding: 9px 18px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  background: var(--accent);
   color: #ffffff;
   border: none;
   border-radius: 10px;
@@ -324,44 +324,77 @@ p {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: background 0.18s ease, transform 0.18s ease, filter 0.18s ease;
   white-space: nowrap;
 }
 
 .btn-primary:hover {
+  background: var(--accent-hover);
   transform: translateY(-1px);
-  box-shadow: 0 6px 20px var(--accent-bg);
+}
+
+.btn-primary:active {
+  background: var(--accent-hover);
+  transform: translateY(0);
+  filter: brightness(0.88);
 }
 
 .btn-primary:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: not-allowed;
   transform: none;
-  box-shadow: none;
+  filter: none;
 }
 
 /* Secondary action button */
 .btn-secondary {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
   padding: 8px 16px;
-  background: var(--card2);
-  color: var(--text-h);
-  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  border: 1.5px solid var(--accent);
   border-radius: 10px;
   font-family: var(--font-sans);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.16s ease;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
   white-space: nowrap;
 }
 
 .btn-secondary:hover {
-  border-color: var(--accent-border);
-  background: var(--accent-bg);
-  color: var(--accent);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.btn-secondary:active {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #ffffff;
+}
+
+@media (max-width: 639px) {
+  .btn-secondary {
+    padding: 5px 9px;
+    font-size: 0.75rem;
+  }
+}
+
+@media (max-width: 639px) {
+  .sample-btn {
+    padding: 4px 8px !important;
+    gap: 4px !important;
+    font-size: 11px !important;
+  }
+
+  .sample-btn svg {
+    width: 11px !important;
+    height: 11px !important;
+  }
 }
 
 /* Ghost button */

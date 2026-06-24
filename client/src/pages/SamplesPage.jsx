@@ -221,15 +221,6 @@ function SampleCard({ sample, onAutoTest }) {
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
-              className="btn-secondary"
-              onClick={() => downloadAll(sample.id, files)}
-              style={{ fontSize: "var(--fs-sm)", padding: "7px 13px" }}
-            >
-              <DownloadIcon style={{ width: 13, height: 13 }} strokeWidth={2} />
-              Download Samples
-            </button>
-
-            <button
               className="btn-primary"
               onClick={handleTest}
               disabled={loading}
@@ -243,9 +234,18 @@ function SampleCard({ sample, onAutoTest }) {
               ) : (
                 <>
                   <DiagnoseIcon style={{ width: 13, height: 13 }} strokeWidth={2} />
-                  Test Diagnosis
+                  Run Test Diagnosis
                 </>
               )}
+            </button>
+
+            <button
+              className="btn-secondary"
+              onClick={() => downloadAll(sample.id, files)}
+              style={{ fontSize: "var(--fs-sm)", padding: "7px 13px" }}
+            >
+              <DownloadIcon style={{ width: 13, height: 13 }} strokeWidth={2} />
+              Download Samples
             </button>
           </div>
         </div>
@@ -275,7 +275,7 @@ function SamplesPage({ onAutoTest }) {
           </p>
           <p style={{ fontSize: "var(--fs-base)", color: "var(--text)", lineHeight: 1.65 }}>
             These recordings were held out of training. Click{" "}
-            <strong style={{ color: "var(--text-h)" }}>Test Diagnosis</strong> to load all samples
+            <strong style={{ color: "var(--text-h)" }}>Run Test Diagnosis</strong> to load all samples
             from that class into the diagnosis page and run the model.
           </p>
         </div>

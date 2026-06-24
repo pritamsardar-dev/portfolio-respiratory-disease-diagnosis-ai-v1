@@ -177,7 +177,7 @@ function GuidePage({ navigate }) {
           <button
             className="btn-secondary"
             onClick={() => navigate?.("samples")}
-            style={{ width: "100%", justifyContent: "center", marginTop: 14 }}
+            style={{ width: "fit-content", justifyContent: "center", marginTop: 14 }}
           >
             Try Sample Diagnosis
           </button>

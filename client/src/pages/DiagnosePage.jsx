@@ -496,7 +496,7 @@ function InputSection({
 
         {/* Sample diagnosis shortcut */}
         <button
-          className="btn-ghost"
+          className="btn-secondary sample-btn"
           onClick={onGoToSamples}
           disabled={isRunning}
           style={{
@@ -504,18 +504,11 @@ function InputSection({
             fontSize: "var(--fs-xs)",
             height: 30,
             borderRadius: 999,
-            background: "var(--accent-bg)",
-            border: "1px solid var(--accent-border)",
-            color: "var(--accent)",
-            display: "flex",
-            alignItems: "center",
             gap: 6,
-            opacity: isRunning ? 0.45 : 1,
-            cursor: isRunning ? "not-allowed" : "pointer",
           }}
         >
           <StethoscopeIcon style={{ width: 12, height: 12 }} strokeWidth={2} />
-          Sample Diagnosis
+          Run Sample Diagnosis
         </button>
       </div>
 
@@ -1126,7 +1119,7 @@ function OutputSection({ result, isRunning, error, startTime, onViewReport, onDo
 
       {/* Action Buttons */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button className="btn-secondary" onClick={onViewReport} style={{ flex: 1 }}>
+        <button className="btn-primary" onClick={onViewReport} style={{ flex: 1, justifyContent: "center" }}>
           <EyeIcon style={{ width: 14, height: 14 }} strokeWidth={2} />
           View Report
         </button>
@@ -1296,12 +1289,12 @@ function ReportModal({ result, onClose }) {
           </h3>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button
-              className="btn-secondary"
+              className="btn-primary"
               onClick={() => downloadPDF(result)}
-              style={{ padding: "6px 12px", fontSize: "var(--fs-sm)" }}
+              style={{ padding: "6px 12px", fontSize: "var(--fs-sm)", justifyContent: "center" }}
             >
               <DownloadIcon style={{ width: 13, height: 13 }} strokeWidth={2} />
-              PDF
+              Download PDF
             </button>
             <button
               onClick={onClose}
