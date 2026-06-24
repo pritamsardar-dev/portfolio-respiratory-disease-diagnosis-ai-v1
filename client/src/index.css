@@ -355,7 +355,7 @@ p {
   padding: 8px 16px;
   background: transparent;
   color: var(--accent);
-  border: 1.5px solid var(--accent);
+  border: 1px solid var(--accent);
   border-radius: 10px;
   font-family: var(--font-sans);
   font-size: 13px;
