@@ -1,6 +1,5 @@
 # predictor.py
 
-import gc
 import io
 import os
 
@@ -22,12 +21,6 @@ MIN_DUR_SEC = 0.5
 # Default hop length used by librosa.feature.melspectrogram.
 # Kept explicit here so frame count math matches what librosa uses internally.
 _HOP_LENGTH = 512
-
-# Number of segments per model.predict call.
-# A fixed chunk size keeps the tensor shape constant across all files so
-# TensorFlow pool allocation stabilizes instead of growing each time a new
-# batch shape is seen from a file with a different number of segments.
-PREDICT_BATCH_SIZE = 8
 
 _model = None
 _label_encoder = None
@@ -106,7 +99,6 @@ def _wav_to_segment_arrays(wav_bytes: bytes) -> list:
 
     # One STFT for the full audio instead of one per segment
     S_full = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=4000)
-    del y  # free raw audio array before segment loop, no longer needed
 
     frames_per_seg = int(np.ceil(SEGMENT_SEC * sr / _HOP_LENGTH))
     min_frames = int(np.ceil(MIN_DUR_SEC * sr / _HOP_LENGTH))
@@ -131,31 +123,26 @@ def _wav_to_segment_arrays(wav_bytes: bytes) -> list:
         ).resize(IMG_SIZE)
         arrays.append(np.array(img, dtype=np.float32) / 255.0)
 
-    del S_full  # free mel matrix after all segments are sliced
     return arrays
 
 
 def _batch_predict(arrays: list) -> list:
     """
-    Run model inference in fixed size mini batches.
+    Run a single model.predict call for all segments of one file.
 
-    Splitting into chunks of PREDICT_BATCH_SIZE instead of one large call per
-    file keeps the tensor shape passed to model.predict constant regardless of
-    how many segments each file produces. TensorFlow pool allocation stabilizes
-    at the fixed chunk size and is reused on every call rather than growing
-    each time a different batch shape is seen across files.
+    Replaces N individual model.predict calls with one call of batch size N.
+    TensorFlow session overhead is paid once per file instead of once per segment.
     Returns a list of (label, confidence) tuples in segment order.
     """
+    batch = np.stack(
+        [np.expand_dims(a, axis=-1) for a in arrays]
+    )
+    raw = _model.predict(batch, verbose=0)
     results = []
-    for i in range(0, len(arrays), PREDICT_BATCH_SIZE):
-        chunk = arrays[i : i + PREDICT_BATCH_SIZE]
-        batch = np.stack([np.expand_dims(a, axis=-1) for a in chunk])
-        raw = _model.predict(batch, verbose=0)
-        for pred in raw:
-            idx = int(np.argmax(pred))
-            label = _label_encoder.inverse_transform([idx])[0]
-            results.append((label, float(pred[idx])))
-        del batch, raw
+    for pred in raw:
+        idx = int(np.argmax(pred))
+        label = _label_encoder.inverse_transform([idx])[0]
+        results.append((label, float(pred[idx])))
     return results
 
 
@@ -207,10 +194,9 @@ def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=No
             )
 
         seg_preds = _batch_predict(seg_arrays)
-        del seg_arrays  # free segment arrays once predictions are complete
         seg_labels = [label for label, _ in seg_preds]
 
-        steps.append(f"{prefix} {len(seg_labels)} segment(s) classified")
+        steps.append(f"{prefix} {len(seg_labels)} segment(s) classified in one batch")
         if progress_callback:
             progress_callback(list(steps))
 
@@ -232,8 +218,6 @@ def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=No
                 "segments_used": len(seg_labels),
             }
         )
-
-        gc.collect()  # reclaim memory from this file before loading the next
 
     steps.append("Aggregating across all files via majority voting")
     if progress_callback:
