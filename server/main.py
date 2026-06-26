@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from typing import List
 
 import asyncio
+import gc
 import threading
 import time
 
@@ -90,6 +91,10 @@ async def run_job(job_id: str, file_data: list) -> None:
 
         except Exception as exc:
             save_job(job_id, status="failed", error=str(exc))
+
+        finally:
+            file_data.clear()
+            gc.collect()
 
 
 @app.get("/job/{job_id}")

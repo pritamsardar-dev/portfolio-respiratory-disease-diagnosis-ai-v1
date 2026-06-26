@@ -2,6 +2,7 @@
 
 import io
 import os
+import gc
 
 import numpy as np
 import librosa
@@ -18,9 +19,13 @@ IMG_SIZE = (64, 64)
 SEGMENT_SEC = 2.0
 MIN_DUR_SEC = 0.5
 
-# Default hop length used by librosa.feature.melspectrogram.
-# Kept explicit here so frame count math matches what librosa uses internally.
 _HOP_LENGTH = 512
+
+# Fixed batch size keeps TensorFlow's internal buffer shape constant across
+# all jobs. A variable batch size causes TF to allocate a new buffer per
+# unique shape and never release the old ones, which exhausts RAM on
+# low-memory servers after the first session.
+PREDICT_BATCH_SIZE = 8
 
 _model = None
 _label_encoder = None
@@ -77,6 +82,10 @@ def load_models():
     if not os.path.exists(ENCODER_PATH):
         raise RuntimeError(f"Label encoder not found: {ENCODER_PATH}")
 
+    # Must be set before the first TF op, not after model load.
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+
     _model = tf.keras.models.load_model(MODEL_PATH)
     _label_encoder = joblib.load(ENCODER_PATH)
     print(f"Model loaded from {MODEL_PATH}")
@@ -84,20 +93,8 @@ def load_models():
 
 
 def _wav_to_segment_arrays(wav_bytes: bytes) -> list:
-    """
-    Decode WAV bytes, compute the mel power spectrogram once for the full
-    audio, then slice into fixed length frame windows and process each window.
-
-    Previously melspectrogram was called once per segment, meaning N STFT
-    computations per file. Now one STFT runs for the full signal and segments
-    are cut from the resulting power matrix. Power to dB conversion still uses
-    each segment's own max as the reference, same as before, so the array
-    values going into the model are identical to the old per segment approach.
-    On Render free tier at 0.1 CPU the STFT is the single largest cost per file.
-    """
     y, sr = librosa.load(io.BytesIO(wav_bytes), sr=None, mono=True)
 
-    # One STFT for the full audio instead of one per segment
     S_full = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=4000)
 
     frames_per_seg = int(np.ceil(SEGMENT_SEC * sr / _HOP_LENGTH))
@@ -112,47 +109,51 @@ def _wav_to_segment_arrays(wav_bytes: bytes) -> list:
         if seg.shape[1] < frames_per_seg:
             seg = np.pad(seg, ((0, 0), (0, frames_per_seg - seg.shape[1])))
 
-        # Per segment dB conversion with segment local max, same ref as before
         S_DB = librosa.power_to_db(seg, ref=np.max)
 
         lo, hi = S_DB.min(), S_DB.max()
         S_norm = (S_DB - lo) / (hi - lo + 1e-8)
 
+        # flipud matches the training image orientation (low freq at bottom).
         img = Image.fromarray(
             (np.flipud(S_norm) * 255).astype(np.uint8)
         ).resize(IMG_SIZE)
         arrays.append(np.array(img, dtype=np.float32) / 255.0)
 
+    del y, S_full
     return arrays
 
 
 def _batch_predict(arrays: list) -> list:
-    """
-    Run a single model.predict call for all segments of one file.
-
-    Replaces N individual model.predict calls with one call of batch size N.
-    TensorFlow session overhead is paid once per file instead of once per segment.
-    Returns a list of (label, confidence) tuples in segment order.
-    """
-    batch = np.stack(
-        [np.expand_dims(a, axis=-1) for a in arrays]
-    )
-    raw = _model.predict(batch, verbose=0)
     results = []
-    for pred in raw:
-        idx = int(np.argmax(pred))
-        label = _label_encoder.inverse_transform([idx])[0]
-        results.append((label, float(pred[idx])))
+
+    for start in range(0, len(arrays), PREDICT_BATCH_SIZE):
+        chunk = arrays[start : start + PREDICT_BATCH_SIZE]
+        real_n = len(chunk)
+
+        batch = np.stack([np.expand_dims(a, axis=-1) for a in chunk])
+
+        # Pad to PREDICT_BATCH_SIZE so every predict call has the same shape.
+        # Padded rows are ignored when reading raw[:real_n] below.
+        if real_n < PREDICT_BATCH_SIZE:
+            pad = np.zeros(
+                (PREDICT_BATCH_SIZE - real_n, *batch.shape[1:]), dtype=batch.dtype
+            )
+            batch = np.concatenate([batch, pad], axis=0)
+
+        raw = _model.predict(batch, verbose=0)
+
+        for pred in raw[:real_n]:
+            idx = int(np.argmax(pred))
+            label = _label_encoder.inverse_transform([idx])[0]
+            results.append((label, float(pred[idx])))
+
+        del batch, raw
+
     return results
 
 
 def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=None) -> dict:
-    """
-    Full inference pipeline for one or more WAV files.
-    Each file is segmented, converted to spectrograms, and classified per segment.
-    A majority vote is applied per file, then again across all files for the
-    final prediction. Everything runs in memory, no temp files are written to disk.
-    """
     predictions = []
     samples = []
     steps = []
@@ -170,10 +171,6 @@ def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=No
 
         filename = item["filename"]
         content = item["content"]
-
-        # Release the raw bytes reference after reading so the GC can reclaim
-        # that memory before the next file is processed. On the 512MB Render
-        # free tier this matters when several large files are in the same job.
         item["content"] = None
 
         n = i + 1
@@ -184,8 +181,6 @@ def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=No
             progress_callback(list(steps))
 
         seg_arrays = _wav_to_segment_arrays(content)
-
-        # Allow GC to free the decoded audio bytes now that arrays are built
         content = None
 
         if not seg_arrays:
@@ -195,6 +190,9 @@ def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=No
 
         seg_preds = _batch_predict(seg_arrays)
         seg_labels = [label for label, _ in seg_preds]
+
+        del seg_arrays
+        gc.collect()
 
         steps.append(f"{prefix} {len(seg_labels)} segment(s) classified in one batch")
         if progress_callback:
@@ -239,6 +237,8 @@ def run_diagnosis(file_data: List[dict], cancel_event=None, progress_callback=No
     steps.append("Processing finished successfully")
     if progress_callback:
         progress_callback(list(steps))
+
+    gc.collect()
 
     return {
         "success": True,
