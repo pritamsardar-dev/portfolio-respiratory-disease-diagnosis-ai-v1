@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from predictor import load_models, run_diagnosis
 import uuid
 from datetime import datetime, timezone
-from jobs import insert_job, fetch_job, save_job, delete_job, get_cancel_event, set_cancelled
+# REPLACE
+from jobs import insert_job, fetch_job, save_job, delete_job, purge_old_jobs, get_cancel_event, set_cancelled
 
 MAX_FILES = 10
 MAX_FILE_SIZE_MB = 10
@@ -29,6 +30,8 @@ _processing_semaphore = asyncio.Semaphore(1)
 async def lifespan(app: FastAPI):
     # Load the CNN model once when the server starts
     load_models()
+    # Clear jobs left over from the previous server session
+    purge_old_jobs()
     yield
 
 
@@ -111,9 +114,6 @@ def get_job_status(job_id: str):
         "result": job["result"],
         "error": job["error"],
     }
-
-    if job["status"] == "completed":
-        delete_job(job_id)
 
     return response
 
