@@ -752,14 +752,16 @@ function DiagnosisProgress({ startTime }) {
         style={{
           fontSize: 12,
           color: "var(--text)",
-          opacity: 0.45,
+          opacity: 0.5,
           textAlign: "center",
-          lineHeight: 1.6,
+          lineHeight: 1.7,
+          maxWidth: 300,
         }}
       >
-        This may take a moment depending on the number
-        <br />
-        of files and server load. Please hold on.
+        Please be patient. On first use, the server may take up to{" "}
+        <strong style={{ color: "var(--text-h)" }}>2 to 3 minutes</strong> to be ready.
+        After that, processing time depends on the number of files and
+        server load, and usually finishes in just a few seconds once warmed up.
       </p>
     </div>
   );
