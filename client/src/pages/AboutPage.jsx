@@ -206,7 +206,7 @@ function AboutPage() {
             }}
           >
             Pulmo AI classifies respiratory diseases from lung audio recordings. WAV files are
-            converted into mel spectrograms and processed by a CNN model to predict 7 conditions.
+            converted into mel spectrograms and processed by a CNN model to predict 8 conditions.
             The system includes a full pipeline with model training, FastAPI backend, and React
             frontend.
           </p>
@@ -436,7 +436,7 @@ function AboutPage() {
           <PipelineStep
             icon={LungsIcon}
             title="CNN Classification"
-            detail="Normalized and passed through the CNN. Outputs a probability score across all 7 conditions."
+            detail="Normalized and passed through the CNN. Outputs a probability score across all 8 conditions."
           />
 
           <PipelineStep
