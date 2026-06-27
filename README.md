@@ -2,7 +2,7 @@
 
 A respiratory disease classification tool that analyzes lung audio recordings. WAV files are segmented into breath cycles, converted to mel spectrograms, and classified by a CNN model trained on the ICBHI 2017 dataset across eight conditions.
 
-Live: https://pulmoai.pritamsardar.dev  |  Case Study: https://pritamsardar.dev/full-case-study/portfolio-respiratory-disease-diagnosis-ai-v1?source=case-studies
+Live: https://pulmoai.pritamsardar.dev  |  Case Study: https://www.pritamsardar.dev/full-case-study/project-row-pulmo-ai?source=case-studies
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/images/pulmoai-hero-dark.png">
@@ -102,10 +102,11 @@ App runs at `http://localhost:5173`.
 server/
 ├── models/          # Trained CNN model (.keras) and label encoder (.pkl)
 ├── utils/
-│   ├── audio.py     # Mel spectrogram generation utility
+│   ├── db.py        # SQLite job store with init, insert, fetch, save, delete, and purge operations
 │   └── cleanup.py   # Temp file removal after each inference run
-├── main.py          # FastAPI app, request validation, and file size limits
-├── predictor.py     # Full inference pipeline with segmentation and majority voting
+├── main.py          # FastAPI app with async job creation and job status and cancel endpoints
+├── jobs.py          # Job lifecycle manager backed by SQLite with in-memory cancel event support
+├── predictor.py     # Full inference pipeline with live progress callbacks and cancel event support
 ├── preprocess.py    # Data preprocessing and augmentation (training only, not deployed)
 └── model_train.py   # CNN architecture and training script (training only, not deployed)
 
@@ -131,6 +132,12 @@ client/
 ```
 
 ## Technical Notes
+
+### Async job system
+
+Diagnosis runs as a background job on the server. When files are submitted, the backend creates a job with a unique ID and returns it immediately so the request never blocks. The frontend stores the job ID in localStorage and polls the status endpoint every second to receive live processing steps and the final result. Navigation away from the diagnosis page and back does not interrupt the run because the job continues on the server regardless of client state. Submitted files are persisted in IndexedDB and the processing log is persisted alongside them so both survive a page reload or navigation and are restored on remount. A cancel endpoint sets a threading event that stops inference between file boundaries, freeing CPU and memory without waiting for the full run to finish.
+
+Job state is persisted to a SQLite database so active diagnoses survive server restarts. Any job that was still running when the server stopped is automatically marked as failed on the next startup so the client receives a clear error instead of polling indefinitely. Completed jobs are removed from the database as soon as the result is served. If the server restarts while the client is polling and the job is no longer found, the frontend stops polling and shows a recoverable error rather than looping on 404 responses.
 
 ### Segment based inference
 
