@@ -377,6 +377,14 @@ p {
   color: #ffffff;
 }
 
+.btn-secondary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+}
+
 @media (max-width: 639px) {
   .btn-secondary {
     padding: 5px 9px;

@@ -505,6 +505,7 @@ function InputSection({
             height: 30,
             borderRadius: 999,
             gap: 6,
+            pointerEvents: isRunning ? "none" : "auto",
           }}
         >
           <StethoscopeIcon style={{ width: 12, height: 12 }} strokeWidth={2} />
