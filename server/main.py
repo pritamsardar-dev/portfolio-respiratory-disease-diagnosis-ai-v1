@@ -13,7 +13,7 @@ from predictor import load_models, run_diagnosis
 import uuid
 from datetime import datetime, timezone
 # REPLACE
-from jobs import insert_job, fetch_job, save_job, delete_job, purge_old_jobs, get_cancel_event, set_cancelled
+from jobs import init_db, insert_job, fetch_job, save_job, delete_job, purge_old_jobs, get_cancel_event, set_cancelled
 
 MAX_FILES = 10
 MAX_FILE_SIZE_MB = 10
@@ -25,9 +25,15 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 # status "queued" until this semaphore is free.
 _processing_semaphore = asyncio.Semaphore(1)
 
+# Keeps a strong reference to each background task so the GC cannot
+# collect it before it finishes. The event loop holds only weak refs.
+_background_tasks: set = set()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Create the jobs table if this is a fresh cold start
+    init_db()
     # Load the CNN model once when the server starts
     load_models()
     # Clear jobs left over from the previous server session
@@ -168,5 +174,7 @@ async def predict(files: List[UploadFile] = File(...)):
 
     job_id = str(uuid.uuid4())
     insert_job(job_id, datetime.now(timezone.utc).isoformat())
-    asyncio.create_task(run_job(job_id, file_data))
+    task = asyncio.create_task(run_job(job_id, file_data))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"job_id": job_id, "status": "queued"}
