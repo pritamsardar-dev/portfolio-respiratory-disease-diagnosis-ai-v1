@@ -1646,6 +1646,7 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   // Prevents the async mount IDB load from overriding files already set by runDiagnosis
   const runDiagnosisCalledRef = useRef(false);
   const waitCancelRef = useRef(false);
+  const runDiagnosisRef = useRef(null);
 
   const handleCancel = async () => {
     waitCancelRef.current = true;
@@ -1793,6 +1794,10 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
     }
   };
 
+  useEffect(() => {
+    runDiagnosisRef.current = runDiagnosis;
+  });
+
   // On mount: restore last submitted files and processing log from IndexedDB.
   // runDiagnosisCalledRef prevents this async callback from overriding files
   // that runDiagnosis has already set when autoTestFiles fires on the same mount.
@@ -1913,9 +1918,18 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
             clearInterval(poll);
             setIsRunning(false);
             setActiveJobId(null);
-            setError("Diagnosis session was lost (server restarted). Please try again.");
             localStorage.removeItem(ACTIVE_JOB_KEY);
             localStorage.removeItem(DIAGNOSIS_START_KEY);
+            idbLoadFiles().then((saved) => {
+              if (saved.length > 0) {
+                // Server restarted and wiped the job — resubmit automatically.
+                // 100ms delay lets React commit isRunning=false before runDiagnosis
+                // reads it, so the isRunning guard doesn't abort the retry.
+                setTimeout(() => runDiagnosisRef.current?.(saved), 100);
+              } else {
+                setError("Diagnosis session was lost. Please try again.");
+              }
+            });
           }
           return;
         }
