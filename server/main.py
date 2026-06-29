@@ -29,15 +29,30 @@ _processing_semaphore = asyncio.Semaphore(1)
 # collect it before it finishes. The event loop holds only weak refs.
 _background_tasks: set = set()
 
+# Set when load_models() finishes. run_job waits on this before processing
+# so a request arriving during cold start gets a job_id immediately and
+# does not time out while the server is still loading the TF model.
+_model_ready = threading.Event()
+
+
+def _load_models_background() -> None:
+    try:
+        load_models()
+    finally:
+        # Always set the event so run_job never hangs if load_models raises
+        _model_ready.set()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create the jobs table if this is a fresh cold start
+    # Ensure the jobs table exists on every cold start before any DB access
     init_db()
-    # Load the CNN model once when the server starts
-    load_models()
     # Clear jobs left over from the previous server session
     purge_old_jobs()
+    # Load the TF model in a background thread so the server starts accepting
+    # requests immediately. A /predict hit during cold start gets a job_id
+    # right away instead of timing out while blocked on model load.
+    threading.Thread(target=_load_models_background, daemon=True).start()
     yield
 
 
@@ -65,6 +80,11 @@ def health_check():
 
 
 async def run_job(job_id: str, file_data: list) -> None:
+    # Wait until the TF model finishes loading before touching the semaphore.
+    # On cold start this holds the job in 'queued' until the model is ready,
+    # however long that takes. The frontend keeps polling normally.
+    await asyncio.to_thread(_model_ready.wait)
+
     async with _processing_semaphore:
         # The job may have been cancelled while it was waiting in the
         # queue behind another job -- don't overwrite that status.
