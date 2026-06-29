@@ -1632,6 +1632,7 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   const startTimeRef = useRef(_savedStart > 0 ? _savedStart : null);
   // Prevents the async mount IDB load from overriding files already set by runDiagnosis
   const runDiagnosisCalledRef = useRef(false);
+  const runDiagnosisRef = useRef(null);
 
   const handleCancel = async () => {
     if (activeJobId) {
@@ -1738,33 +1739,57 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
       }, 200);
     }
 
-    try {
-      const formData = new FormData();
-      filesToRun.forEach((f) => {
-        if (f instanceof File) formData.append("files", f);
-      });
+    await idbClearFiles();
+    await idbClearLog();
+    await idbSaveFiles(filesToRun.filter((f) => f instanceof File));
 
-      await idbClearFiles();
-      await idbClearLog();
-      await idbSaveFiles(filesToRun.filter((f) => f instanceof File));
+    const MAX_RETRIES = 6;
+    const RETRY_DELAY_MS = 8000;
+    let lastErr = null;
+    let submitted = false;
 
-      const response = await fetch(`${API_BASE}/predict`, {
-        method: "POST",
-        body: formData,
-      });
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const formData = new FormData();
+        filesToRun.forEach((f) => {
+          if (f instanceof File) formData.append("files", f);
+        });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.detail || "Diagnosis failed. Please check the backend.");
+        const response = await fetch(`${API_BASE}/predict`, {
+          method: "POST",
+          body: formData,
+        });
+
+        const isServerBusy = response.status === 502 || response.status === 503;
+        if (isServerBusy) {
+          lastErr = new Error("Server is starting up, retrying...");
+          if (attempt < MAX_RETRIES) {
+            await new Promise((res) => setTimeout(res, RETRY_DELAY_MS));
+            continue;
+          }
+          break;
+        }
+
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.detail || "Diagnosis failed. Please check the backend.");
+        }
+
+        const data = await response.json();
+        localStorage.setItem(ACTIVE_JOB_KEY, data.job_id);
+        setActiveJobId(data.job_id);
+        submitted = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+        const isNetworkError = err instanceof TypeError;
+        if (!isNetworkError || attempt === MAX_RETRIES) break;
+        await new Promise((res) => setTimeout(res, RETRY_DELAY_MS));
       }
+    }
 
-      const data = await response.json();
-      // data = { job_id: "...", status: "queued" }
-
-      localStorage.setItem(ACTIVE_JOB_KEY, data.job_id);
-      setActiveJobId(data.job_id);
-    } catch (err) {
-      setError(err.message);
+    if (!submitted) {
+      setError(lastErr?.message || "Server did not respond. Please try again.");
       setIsRunning(false);
       setStartTime(null);
       startTimeRef.current = null;
@@ -1772,6 +1797,9 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
       localStorage.removeItem(DIAGNOSIS_START_KEY);
     }
   };
+  useEffect(() => {
+    runDiagnosisRef.current = runDiagnosis;
+  });
 
   // On mount: restore last submitted files and processing log from IndexedDB.
   // runDiagnosisCalledRef prevents this async callback from overriding files
@@ -1868,6 +1896,8 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   useEffect(() => {
     if (!activeJobId) return;
 
+    let lastGoodMs = Date.now();
+
     const poll = setInterval(async () => {
       try {
         const res = await fetch(`${API_BASE}/job/${activeJobId}`);
@@ -1879,9 +1909,19 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
             setError("Diagnosis session was lost (server restarted). Please try again.");
             localStorage.removeItem(ACTIVE_JOB_KEY);
             localStorage.removeItem(DIAGNOSIS_START_KEY);
+          } else if (Date.now() - lastGoodMs > 30000) {
+            clearInterval(poll);
+            setIsRunning(false);
+            setActiveJobId(null);
+            localStorage.removeItem(ACTIVE_JOB_KEY);
+            localStorage.removeItem(DIAGNOSIS_START_KEY);
+            idbLoadFiles().then((saved) => {
+              if (saved.length > 0) setTimeout(() => runDiagnosisRef.current?.(saved), 50);
+            });
           }
           return;
         }
+        lastGoodMs = Date.now();
         const job = await res.json();
 
         setProcessingSteps(job.processing_steps || []);
@@ -1933,7 +1973,16 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
           localStorage.removeItem(DIAGNOSIS_START_KEY);
         }
       } catch {
-        // Network hiccup keep trying
+        if (Date.now() - lastGoodMs > 30000) {
+          clearInterval(poll);
+          setIsRunning(false);
+          setActiveJobId(null);
+          localStorage.removeItem(ACTIVE_JOB_KEY);
+          localStorage.removeItem(DIAGNOSIS_START_KEY);
+          idbLoadFiles().then((saved) => {
+            if (saved.length > 0) setTimeout(() => runDiagnosisRef.current?.(saved), 50);
+          });
+        }
       }
     }, 1000);
 
