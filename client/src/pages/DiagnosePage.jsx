@@ -138,6 +138,19 @@ async function idbClearLog() {
   }
 }
 
+async function waitForServer(isCancelled) {
+  for (;;) {
+    if (isCancelled?.()) return;
+    try {
+      const res = await fetch(`${API_BASE}/health`);
+      if (res.ok) return;
+    } catch {
+      // server not yet up
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
+
 const DETECTABLE_CONDITIONS = [
   "Healthy",
   "COPD",
@@ -1632,9 +1645,10 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   const startTimeRef = useRef(_savedStart > 0 ? _savedStart : null);
   // Prevents the async mount IDB load from overriding files already set by runDiagnosis
   const runDiagnosisCalledRef = useRef(false);
-  const runDiagnosisRef = useRef(null);
+  const waitCancelRef = useRef(false);
 
   const handleCancel = async () => {
+    waitCancelRef.current = true;
     if (activeJobId) {
       try {
         await fetch(`${API_BASE}/job/${activeJobId}/cancel`, { method: "POST" });
@@ -1653,6 +1667,7 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
   };
 
   const handleReset = () => {
+    waitCancelRef.current = true;
     setFiles([]);
     setResult(null);
     setProcessingSteps([]);
@@ -1713,6 +1728,7 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
 
     // Mark immediately so the mount IDB callback cannot race and override these files
     runDiagnosisCalledRef.current = true;
+    waitCancelRef.current = false;
 
     if (Array.isArray(overrideFiles)) {
       setFiles(overrideFiles);
@@ -1739,57 +1755,36 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
       }, 200);
     }
 
-    await idbClearFiles();
-    await idbClearLog();
-    await idbSaveFiles(filesToRun.filter((f) => f instanceof File));
+    try {
+      const formData = new FormData();
+      filesToRun.forEach((f) => {
+        if (f instanceof File) formData.append("files", f);
+      });
 
-    const MAX_RETRIES = 6;
-    const RETRY_DELAY_MS = 8000;
-    let lastErr = null;
-    let submitted = false;
+      await idbClearFiles();
+      await idbClearLog();
+      await idbSaveFiles(filesToRun.filter((f) => f instanceof File));
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        const formData = new FormData();
-        filesToRun.forEach((f) => {
-          if (f instanceof File) formData.append("files", f);
-        });
+      await waitForServer(() => waitCancelRef.current);
+      if (waitCancelRef.current) return;
 
-        const response = await fetch(`${API_BASE}/predict`, {
-          method: "POST",
-          body: formData,
-        });
+      const response = await fetch(`${API_BASE}/predict`, {
+        method: "POST",
+        body: formData,
+      });
 
-        const isServerBusy = response.status === 502 || response.status === 503;
-        if (isServerBusy) {
-          lastErr = new Error("Server is starting up, retrying...");
-          if (attempt < MAX_RETRIES) {
-            await new Promise((res) => setTimeout(res, RETRY_DELAY_MS));
-            continue;
-          }
-          break;
-        }
-
-        if (!response.ok) {
-          const err = await response.json();
-          throw new Error(err.detail || "Diagnosis failed. Please check the backend.");
-        }
-
-        const data = await response.json();
-        localStorage.setItem(ACTIVE_JOB_KEY, data.job_id);
-        setActiveJobId(data.job_id);
-        submitted = true;
-        break;
-      } catch (err) {
-        lastErr = err;
-        const isNetworkError = err instanceof TypeError;
-        if (!isNetworkError || attempt === MAX_RETRIES) break;
-        await new Promise((res) => setTimeout(res, RETRY_DELAY_MS));
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || "Diagnosis failed. Please check the backend.");
       }
-    }
 
-    if (!submitted) {
-      setError(lastErr?.message || "Server did not respond. Please try again.");
+      const data = await response.json();
+      // data = { job_id: "...", status: "queued" }
+
+      localStorage.setItem(ACTIVE_JOB_KEY, data.job_id);
+      setActiveJobId(data.job_id);
+    } catch (err) {
+      setError(err.message);
       setIsRunning(false);
       setStartTime(null);
       startTimeRef.current = null;
@@ -1797,9 +1792,6 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
       localStorage.removeItem(DIAGNOSIS_START_KEY);
     }
   };
-  useEffect(() => {
-    runDiagnosisRef.current = runDiagnosis;
-  });
 
   // On mount: restore last submitted files and processing log from IndexedDB.
   // runDiagnosisCalledRef prevents this async callback from overriding files
@@ -1821,22 +1813,35 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
     };
   }, []);
 
-  // On mount: reconnect to an in-progress job if one was left running (navigation or reload)
+  // On mount: reconnect to an in-progress job if one was left running (navigation or reload).
+  // Waits for the server to be healthy first so cold-start reloads re-submit automatically.
   useEffect(() => {
     const savedJobId = localStorage.getItem(ACTIVE_JOB_KEY);
     if (!savedJobId) return;
 
-    fetch(`${API_BASE}/job/${savedJobId}`)
-      .then((r) => {
+    let cancelled = false;
+
+    (async () => {
+      await waitForServer(() => cancelled);
+      if (cancelled) return;
+
+      try {
+        const r = await fetch(`${API_BASE}/job/${savedJobId}`);
+
+        // 404 means server restarted and wiped SQLite — re-submit files from IDB
         if (r.status === 404) {
           localStorage.removeItem(ACTIVE_JOB_KEY);
-          localStorage.removeItem(DIAGNOSIS_START_KEY);
-          return null;
+          const savedFiles = await idbLoadFiles();
+          if (savedFiles.length > 0 && !cancelled) {
+            setTimeout(() => runDiagnosis(savedFiles), 0);
+          } else {
+            localStorage.removeItem(DIAGNOSIS_START_KEY);
+          }
+          return;
         }
-        return r.json();
-      })
-      .then(async (job) => {
-        if (!job) return;
+
+        const job = await r.json();
+
         if (job.status === "queued" || job.status === "running") {
           // Use the client-side timestamp stored at diagnosis start never parse
           // job.created_at here because Python's datetime.utcnow().isoformat() has
@@ -1851,52 +1856,54 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
           setProcessingSteps(job.processing_steps || []);
           setProcessingOpen(true);
 
-          // Restore uploaded files from IndexedDB back into the input section
           const savedFiles = await idbLoadFiles();
-          if (savedFiles.length > 0) {
-            setFiles(savedFiles);
-          }
+          if (savedFiles.length > 0) setFiles(savedFiles);
         } else if (job.status === "completed" && job.result) {
-          // Job finished while the user was on another page; show the result immediately.
-          // This is the case that was previously silently discarding the completed result.
           const processingTime = job.result.processing_time_server || null;
-
           const resultData = {
             ...job.result,
             diagnosedAt: new Date().toISOString(),
             ...(processingTime ? { processingTime } : {}),
             isStored: false,
           };
-
           localStorage.setItem(DIAGNOSIS_KEY, JSON.stringify(resultData));
           localStorage.removeItem(ACTIVE_JOB_KEY);
           localStorage.removeItem(DIAGNOSIS_START_KEY);
-
           setResult(resultData);
           setDiagnosisComplete(true);
           setProcessingSteps(job.processing_steps || []);
           setProcessingOpen((job.processing_steps || []).length > 0);
         } else if (job.status === "failed") {
-          setError(job.error || "Diagnosis failed.");
-          localStorage.removeItem(ACTIVE_JOB_KEY);
-          localStorage.removeItem(DIAGNOSIS_START_KEY);
+          // Server restart marks in-flight jobs as failed — re-submit
+          if (job.error === "Server restarted during processing") {
+            localStorage.removeItem(ACTIVE_JOB_KEY);
+            const savedFiles = await idbLoadFiles();
+            if (savedFiles.length > 0 && !cancelled) {
+              setTimeout(() => runDiagnosis(savedFiles), 0);
+            } else {
+              localStorage.removeItem(DIAGNOSIS_START_KEY);
+            }
+          } else {
+            setError(job.error || "Diagnosis failed.");
+            localStorage.removeItem(ACTIVE_JOB_KEY);
+            localStorage.removeItem(DIAGNOSIS_START_KEY);
+          }
         } else {
-          // cancelled or any other terminal state
           localStorage.removeItem(ACTIVE_JOB_KEY);
           localStorage.removeItem(DIAGNOSIS_START_KEY);
         }
-      })
-      .catch(() => {
+      } catch {
         localStorage.removeItem(ACTIVE_JOB_KEY);
         localStorage.removeItem(DIAGNOSIS_START_KEY);
-      });
-  }, []);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll active job every 1s for live steps and final result
   useEffect(() => {
     if (!activeJobId) return;
-
-    let lastGoodMs = Date.now();
 
     const poll = setInterval(async () => {
       try {
@@ -1909,19 +1916,9 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
             setError("Diagnosis session was lost (server restarted). Please try again.");
             localStorage.removeItem(ACTIVE_JOB_KEY);
             localStorage.removeItem(DIAGNOSIS_START_KEY);
-          } else if (Date.now() - lastGoodMs > 30000) {
-            clearInterval(poll);
-            setIsRunning(false);
-            setActiveJobId(null);
-            localStorage.removeItem(ACTIVE_JOB_KEY);
-            localStorage.removeItem(DIAGNOSIS_START_KEY);
-            idbLoadFiles().then((saved) => {
-              if (saved.length > 0) setTimeout(() => runDiagnosisRef.current?.(saved), 50);
-            });
           }
           return;
         }
-        lastGoodMs = Date.now();
         const job = await res.json();
 
         setProcessingSteps(job.processing_steps || []);
@@ -1973,16 +1970,7 @@ function DiagnosePage({ navigate, autoTestFiles, onClearAutoTest }) {
           localStorage.removeItem(DIAGNOSIS_START_KEY);
         }
       } catch {
-        if (Date.now() - lastGoodMs > 30000) {
-          clearInterval(poll);
-          setIsRunning(false);
-          setActiveJobId(null);
-          localStorage.removeItem(ACTIVE_JOB_KEY);
-          localStorage.removeItem(DIAGNOSIS_START_KEY);
-          idbLoadFiles().then((saved) => {
-            if (saved.length > 0) setTimeout(() => runDiagnosisRef.current?.(saved), 50);
-          });
-        }
+        // Network hiccup keep trying
       }
     }, 1000);
 
